@@ -1,0 +1,689 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Spiral CodeMaker</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Monaco', 'Courier New', monospace; background: #1a1a2e; color: #e0e0e0; padding: 20px; }
+        h1 { color: #00d4ff; margin-bottom: 20px; border-bottom: 2px solid #00d4ff; padding-bottom: 10px; }
+        h2 { color: #00d4ff; margin: 20px 0 10px 0; font-size: 18px; }
+        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+        .card { background: #1e1e3e; border: 1px solid #333; border-radius: 8px; padding: 15px; margin-bottom: 15px; }
+        .metric { display: flex; justify-content: space-between; padding: 5px 0; border-bottom: 1px solid #333; }
+        .metric:last-child { border-bottom: none; }
+        .metric .label { color: #888; }
+        .metric .value { color: #0f0; font-weight: bold; }
+        .metric .value.fail { color: #f44; }
+        .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 12px; margin-right: 5px; }
+        .badge-proposed { background: #555; }
+        .badge-applied { background: #0a7; color: #000; }
+        .badge-failed { background: #c33; color: #fff; }
+        .badge-approved { background: #0af; color: #000; }
+        table { width: 100%; border-collapse: collapse; font-size: 13px; }
+        th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid #333; }
+        th { color: #00d4ff; }
+        .attention-bar { height: 20px; background: #333; border-radius: 3px; margin: 2px 0; position: relative; overflow: hidden; }
+        .attention-fill { height: 100%; background: linear-gradient(90deg, #00d4ff, #0f0); }
+        .unit-list { max-height: 200px; overflow-y: auto; }
+        .unit-item { padding: 5px; border-bottom: 1px solid #333; display: flex; justify-content: space-between; }
+        .refresh-btn { background: #00d4ff; color: #000; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; margin-bottom: 15px; font-weight: bold; }
+        .refresh-btn:hover { background: #0ff; }
+        .status-pass { color: #0f0; }
+        .status-fail { color: #f44; }
+        .json-view { background: #0d0d1a; padding: 10px; border-radius: 4px; font-size: 12px; max-height: 200px; overflow: auto; white-space: pre-wrap; word-break: break-all; }
+        .file-path { color: #ff8; }
+        .model-card { background: #0d0d1a; border: 1px solid #333; border-radius: 4px; padding: 10px; margin: 5px 0; font-size: 13px; }
+        .model-selected { border-color: #00d4ff; background: #1a2a3a; }
+        .model-name { color: #00d4ff; font-weight: bold; }
+        .model-cap { color: #888; font-size: 11px; }
+        .model-status-available { color: #0f0; }
+        .model-status-missing { color: #f44; }
+        .tag { display: inline-block; background: #333; color: #ccc; padding: 1px 5px; border-radius: 3px; font-size: 10px; margin: 1px; }
+        .tab { display: none; }
+        .tab-active { display: block; }
+        .tab-nav { display: flex; gap: 10px; margin-bottom: 10px; }
+        .tab-btn { background: #333; border: 1px solid #555; padding: 5px 15px; border-radius: 4px; cursor: pointer; color: #ccc; }
+        .tab-btn:hover { background: #444; }
+        .tab-btn.active { background: #00d4ff; color: #000; }
+        .form-row { margin-bottom: 8px; }
+        .form-row label { display: block; color: #888; font-size: 12px; margin-bottom: 2px; }
+        .form-row input, .form-row select, .form-row textarea { width: 100%; padding: 5px; background: #0d0d1a; border: 1px solid #444; border-radius: 3px; color: #e0e0e0; font-size: 12px; font-family: inherit; }
+        .btn-small { background: #00d4ff; color: #000; border: none; padding: 4px 12px; border-radius: 3px; cursor: pointer; font-size: 12px; }
+        .btn-small:hover { background: #0ff; }
+        .btn-stop { background: #c33; color: #fff; }
+        .btn-stop:hover { background: #f44; }
+        .input-group { display: flex; gap: 5px; }
+        .path-input { flex: 1; }
+        .refresh-btn-split { flex: 0 0 auto; }
+        .run-card { background: #0d0d1a; border: 1px solid #333; border-radius: 4px; padding: 10px; margin: 5px 0; font-size: 13px; }
+        .run-card.running { border-left: 3px solid #00d4ff; }
+        .run-card.completed { border-left: 3px solid #0a7; }
+        .run-card.failed { border-left: 3px solid #c33; }
+        .run-card.pending { border-left: 3px solid #888; }
+        .section { display: none; }
+        .section-active { display: block; }
+        .nav-btn { background: #333; border: 1px solid #555; padding: 8px 16px; border-radius: 4px; cursor: pointer; color: #ccc; margin-right: 5px; margin-bottom: 10px; }
+        .nav-btn:hover { background: #444; }
+        .nav-btn.active { background: #00d4ff; color: #000; }
+        .spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid #333; border-top-color: #00d4ff; border-radius: 50%; animation: spin 0.6s linear infinite; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .text-center { text-align: center; }
+    </style>
+</head>
+<body>
+    <h1>Spiral CodeMaker <span id="mode-badge"></span></h1>
+
+    <div class="nav-buttons">
+        <button class="nav-btn active" onclick="showSection('dashboard')">Dashboard</button>
+        <button class="nav-btn" onclick="showSection('runs')">Runs</button>
+        <button class="nav-btn" onclick="showSection('models')">Models</button>
+        <button class="nav-btn" onclick="showSection('gpu')">GPU / Local</button>
+    </div>
+
+    <div id="dashboard" class="section section-active">
+        <button class="refresh-btn" onclick="refresh()">Refresh</button>
+
+        <div class="grid">
+            <div class="card">
+                <h2>System State</h2>
+                <div id="metrics"></div>
+            </div>
+            <div class="card">
+                <h2>Attention Weights</h2>
+                <div id="attention"></div>
+            </div>
+        </div>
+
+        <div class="grid">
+            <div class="card">
+                <h2>Active Units</h2>
+                <div class="unit-list" id="units"></div>
+            </div>
+            <div class="card">
+                <h2>Test Results</h2>
+                <div id="tests"></div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>Code Proposals</h2>
+            <div id="proposals"></div>
+        </div>
+
+        <div class="card">
+            <h2>Conflicts & Objections</h2>
+            <div id="conflicts"></div>
+        </div>
+
+        <div class="card">
+            <h2>Generated Files</h2>
+            <div id="files"></div>
+        </div>
+
+        <div class="card">
+            <h2>Revision History</h2>
+            <div id="revisions"></div>
+        </div>
+    </div>
+
+    <div id="runs" class="section">
+        <div class="card">
+            <h2>Submit New Run</h2>
+            <div class="form-row">
+                <label>Intent / Goal</label>
+                <textarea id="run-intent" placeholder="e.g. Build a small HTTP service that stores TODO items." rows="3"></textarea>
+            </div>
+            <div class="form-row">
+                <label>Iterations</label>
+                <input type="number" id="run-iterations" value="3" min="1" max="10">
+            </div>
+            <div class="form-row">
+                <label>Output Directory</label>
+                <input type="text" id="run-output" placeholder="./spiral-output">
+            </div>
+            <button class="refresh-btn" onclick="submitRun()">Submit Run</button>
+        </div>
+
+        <div class="card">
+            <h2>Previous Runs</h2>
+            <div id="runs-list"></div>
+        </div>
+    </div>
+
+    <div id="models" class="section">
+        <div class="card">
+            <h2>Model Management</h2>
+            <div class="tab-nav">
+                <div class="tab-btn active" onclick="showModelTab('models-configured')">Configured Models</div>
+                <div class="tab-btn" onclick="showModelTab('models-scan')">Scan for GGUF</div>
+                <div class="tab-btn" onclick="showModelTab('models-hf')">HuggingFace Search</div>
+                <div class="tab-btn" onclick="showModelTab('models-providers')">Providers</div>
+            </div>
+            <div id="models-configured" class="tab tab-active">
+                <button class="btn-small" onclick="loadModels()">Refresh Models</button>
+                <div id="models-container"></div>
+            </div>
+            <div id="models-scan" class="tab">
+                <div class="form-row">
+                    <label>Drive/Path to scan</label>
+                    <div class="input-group">
+                        <input type="text" id="scan-path" placeholder="/D/ or C:\models" class="path-input">
+                        <button class="btn-small refresh-btn-split" onclick="scanGGUF()">Scan</button>
+                    </div>
+                </div>
+                <div id="scan-results"></div>
+            </div>
+            <div id="models-hf" class="tab">
+                <div class="form-row">
+                    <label>HuggingFace Search</label>
+                    <div class="input-group">
+                        <input type="text" id="hf-query" placeholder="e.g. starcoder, codellama" class="path-input">
+                        <button class="btn-small refresh-btn-split" onclick="searchHF()">Search</button>
+                    </div>
+                </div>
+                <div class="form-row">
+                    <label>HF API Token (optional)</label>
+                    <input type="text" id="hf-token" placeholder="hf_xxx">
+                </div>
+                <div id="hf-results"></div>
+            </div>
+            <div id="models-providers" class="tab">
+                <button class="btn-small" onclick="loadProviders()">Refresh Providers</button>
+                <div id="providers-container"></div>
+                <div class="form-row" style="margin-top:10px;">
+                    <label>Add Provider</label>
+                    <div class="input-group">
+                        <input type="text" id="provider-name" placeholder="name" class="path-input">
+                    <select id="provider-type">
+                        <option value="mock">mock</option>
+                        <option value="huggingface">huggingface</option>
+                        <option value="gguf">gguf</option>
+                        <option value="ollama">ollama</option>
+                    </select>
+                    </div>
+                    <input type="text" id="provider-url" placeholder="URL (optional)">
+                    <input type="text" id="provider-token" placeholder="Token (optional)">
+                    <button class="btn-small" onclick="addProvider()">Add Provider</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="gpu" class="section">
+        <div class="card">
+            <h2>GPU & Local Hardware</h2>
+            <div id="gpu-info">
+                <button class="btn-small" onclick="loadGPUInfo()">Refresh GPU Info</button>
+                <div id="gpu-container"></div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>llama.cpp Server</h2>
+            <div id="llamacpp-status">
+                <button class="btn-small" onclick="loadLlamaCppStatus()">Refresh llama.cpp Status</button>
+                <div id="llamacpp-container"></div>
+            </div>
+            <div class="form-row" style="marginTop:10px;">
+                <label>Load Model with GPU Layers</label>
+                <input type="text" id="llama-model-path" placeholder="path/to/model.gguf">
+                <input type="number" id="llama-gpu-layers" placeholder="GPU layers (e.g. 999)" value="999">
+                <button class="btn-small" onclick="loadLlamaModel()">Load Model</button>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>Downloaded Models</h2>
+            <div class="btn-small" onclick="loadDownloadedModels()">Refresh</div>
+            <div id="downloaded-container"></div>
+        </div>
+    </div>
+
+    <script>
+    function showSection(section) {
+        document.querySelectorAll('.section').forEach(s => s.classList.remove('section-active'));
+        document.getElementById(section).classList.add('section-active');
+        document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+        event.target.classList.add('active');
+    }
+
+    function showModelTab(tabId) {
+        document.querySelectorAll('.tab').forEach(t => t.classList.remove('tab-active'));
+        document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+        document.getElementById(tabId).classList.add('tab-active');
+        event.target.classList.add('active');
+    }
+
+    async function fetchJSON(url, opts = {}) {
+        const resp = await fetch(url, {
+            headers: { 'Content-Type': 'application/json' },
+            ...opts
+        });
+        if (!resp.ok) {
+            const txt = await resp.text();
+            throw new Error(`HTTP ${resp.status}: ${txt}`);
+        }
+        return resp.json();
+    }
+
+    function badge(status) {
+        const cls = {
+            'PROPOSED': 'badge-proposed',
+            'APPROVED': 'badge-approved',
+            'APPLIED': 'badge-applied',
+            'REJECTED': 'badge-failed',
+            'FAILED': 'badge-failed',
+            'PASSED': 'badge-applied',
+            'PENDING': 'badge-proposed',
+        }[status] || 'badge-proposed';
+        return `<span class="badge ${cls}">${status}</span>`;
+    }
+
+    async function refresh() {
+        try {
+            const snap = await fetchJSON('/api/snapshot');
+            const iters = await fetchJSON('/api/iterations');
+
+            let html = '';
+            html += `<div class="metric"><span class="label">Revision</span><span class="value">${snap.revision}</span></div>`;
+            html += `<div class="metric"><span class="label">Confidence</span><span class="value">${(snap.confidence*100).toFixed(0)}%</span></div>`;
+            html += `<div class="metric"><span class="label">Hypotheses</span><span class="value">${snap.hypotheses.length}</span></div>`;
+            html += `<div class="metric"><span class="label">Evidence</span><span class="value">${snap.evidence.length}</span></div>`;
+            html += `<div class="metric"><span class="label">Proposals</span><span class="value">${snap.proposals.length}</span></div>`;
+            html += `<div class="metric"><span class="label">Test Results</span><span class="value">${snap.test_results.length}</span></div>`;
+            html += `<div class="metric"><span class="label">Decisions</span><span class="value">${snap.decisions.length}</span></div>`;
+            html += `<div class="metric"><span class="label">Findings</span><span class="value">${snap.findings.length}</span></div>`;
+            html += `<div class="metric"><span class="label">Objections</span><span class="value ${snap.objections.length > 0 ? 'fail' : ''}">${snap.objections.length}</span></div>`;
+            html += `<div class="metric"><span class="label">Conflicts</span><span class="value ${snap.conflicts.length > 0 ? 'fail' : ''}">${snap.conflicts.length}</span></div>`;
+            html += `<div class="metric"><span class="label">Unresolved</span><span class="value ${snap.unresolved.length > 0 ? 'fail' : ''}">${snap.unresolved.length}</span></div>`;
+            html += `<div class="metric"><span class="label">Iterations</span><span class="value">${iters.length}</span></div>`;
+            document.getElementById('metrics').innerHTML = html;
+
+            let att = '';
+            const sortedAtt = Object.entries(snap.attention_map || {}).sort((a,b) => b[1]-a[1]);
+            sortedAtt.forEach(([id, w]) => {
+                const pct = Math.min(w * 100, 100);
+                att += `<div><div>${id}: ${(w*100).toFixed(0)}</div>`;
+                att += `<div class="attention-bar"><div class="attention-fill" style="width:${pct}%"></div></div></div>`;
+            });
+            document.getElementById('attention').innerHTML = att;
+
+            let u = '';
+            snap.active_units.forEach(unit => {
+                u += `<div class="unit-item"><span>${unit.name} (${unit.id})</span><span class="badge">${unit.role}</span></div>`;
+            });
+            document.getElementById('units').innerHTML = u;
+
+            let t = '';
+            snap.test_results.forEach(tr => {
+                const cls = tr.status === 'PASSED' ? 'status-pass' : 'status-fail';
+                t += `<div><strong class="${cls}">${tr.status}</strong> ${tr.id} (${tr.duration}ms)</div>`;
+                if (tr.stdout && tr.stdout.length > 500) {
+                    t += `<div class="json-view">${tr.stdout.substring(0, 500)}...</div>`;
+                } else if (tr.stdout) {
+                    t += `<div class="json-view">${tr.stdout}</div>`;
+                }
+            });
+            document.getElementById('tests').innerHTML = t;
+
+            let p = '<table><tr><th>File</th><th>Op</th><th>Status</th><th>From</th><th>Reason</th></tr>';
+            snap.proposals.forEach(prop => {
+                p += `<tr><td class="file-path">${prop.file}</td><td>${prop.operation}</td><td>${badge(prop.status)}</td><td>${prop.originating_unit}</td><td>${prop.reason}</td></tr>`;
+            });
+            p += '</table>';
+            document.getElementById('proposals').innerHTML = p;
+
+            let c = '';
+            snap.objections.forEach(obj => {
+                c += `<div><strong>${obj.source_unit}</strong> → <span class="file-path">${obj.target}</span> [${obj.severity}]: ${obj.content}</div>`;
+            });
+            snap.conflicts.forEach(conf => {
+                c += `<div style="margin-top:10px;"><strong>CONFLICT:</strong> ${conf.subject} [${conf.severity}] - ${conf.resolution || 'UNRESOLVED'}</div>`;
+            });
+            document.getElementById('conflicts').innerHTML = c;
+
+            let f = '';
+            if (snap.architecture_plan) {
+                f += `<div style="margin-bottom:10px;"><strong>Plan:</strong> ${snap.architecture_plan.description}</div>`;
+            }
+            Object.keys(snap.generated_files || {}).sort().forEach(path => {
+                const entry = snap.generated_files[path];
+                f += `<div><span class="file-path">${path}</span> <a href="/api/file/${path}" target="_blank">view</a></div>`;
+            });
+            document.getElementById('files').innerHTML = f;
+
+            let r = '';
+            iters.forEach(iter => {
+                const testStatus = iter.tests && iter.tests.some(t => t.status === 'FAILED') ? 'fail' : '';
+                r += `<div class="metric"><span class="label">Iteration ${iter.iteration_id}</span><span class="value ${testStatus}">${iter.summary}</span></div>`;
+            });
+            document.getElementById('revisions').innerHTML = r;
+        } catch (err) {
+            document.getElementById('metrics').innerHTML = `<div class="model-cap">Error: ${err.message}</div>`;
+        }
+    }
+
+    async function loadRuns() {
+        try {
+            const runs = await fetchJSON('/api/runs');
+            let html = '';
+            if (runs.length === 0) {
+                html = '<div class="model-cap">No runs yet. Submit a run to get started.</div>';
+            } else {
+                runs.forEach(run => {
+                    const cls = run.status === 'completed' ? 'completed' :
+                                run.status === 'failed' ? 'failed' :
+                                run.status === 'running' ? 'running' : 'pending';
+                    html += `<div class="run-card ${cls}">`;
+                    html += `<div><strong>${run.intent}</strong> <span class="badge">${run.status}</span></div>`;
+                    html += `<div class="model-cap">ID: ${run.id} | Started: ${run.start_time || 'pending'} | Output: ${run.output_path}</div>`;
+                    if (run.error) html += `<div class="model-cap status-fail">Error: ${run.error}</div>`;
+                    html += `<button class="btn-small" onclick="viewRun('${run.id}')">View Details</button>`;
+                    html += `</div>`;
+                });
+            }
+            document.getElementById('runs-list').innerHTML = html;
+        } catch (err) {
+            document.getElementById('runs-list').innerHTML = `<div class="model-cap">Error: ${err.message}</div>`;
+        }
+    }
+
+    async function submitRun() {
+        const intent = document.getElementById('run-intent').value;
+        if (!intent) {
+            alert('Intent is required');
+            return;
+        }
+        const iterations = parseInt(document.getElementById('run-iterations').value) || 3;
+        const output = document.getElementById('run-output').value || './spiral-output';
+
+        const config = {
+            intent: intent,
+            iterations: iterations,
+            output_dir: output,
+        };
+
+        try {
+            const resp = await fetchJSON('/api/runs/submit', {
+                method: 'POST',
+                body: JSON.stringify(config)
+            });
+            alert(`Run submitted! ID: ${resp.run_id}`);
+            document.getElementById('run-intent').value = '';
+            loadRuns();
+        } catch (err) {
+            alert(`Error: ${err.message}`);
+        }
+    }
+
+    async function viewRun(runId) {
+        try {
+            const run = await fetchJSON(`/api/runs/${runId}`);
+            let html = `<div class="run-card"><strong>Run ${run.id}</strong>`;
+            html += `<div class="model-cap">Status: ${run.status}</div>`;
+            html += `<div class="model-cap">Intent: ${run.config.intent}</div>`;
+            html += `<div class="model-cap">Output: ${run.output_path}</div>`;
+            if (run.error) html += `<div class="model-cap status-fail">Error: ${run.error}</div>`;
+
+            html += `<h3 style="margin-top:10px;">Iterations (${run.iterations.length})</h3>`;
+            run.iterations.forEach(iter => {
+                html += `<div class="model-cap">Iteration ${iter.iteration_id}: ${iter.summary} (${iter.phase})</div>`;
+            });
+
+            html += `<h3 style="margin-top:10px;">Files (${run.files.length})</h3>`;
+            run.files.forEach(f => {
+                html += `<div class="file-path">${f}</div>`;
+            });
+
+            html += `</div>`;
+            alert('Run details loaded (check console)');
+            console.log(run);
+        } catch (err) {
+            alert(`Error: ${err.message}`);
+        }
+    }
+
+    async function loadModels() {
+        try {
+            const models = await fetchJSON('/api/models');
+            let html = '';
+            if (models.length === 0) {
+                html = '<div class="model-cap">No models configured. Use the GGUF scanner or HF search to add models.</div>';
+            } else {
+                models.forEach(m => {
+                    html += `<div class="model-card">`;
+                    html += `<div class="model-name">${m.name}</div>`;
+                    html += `<div class="model-cap">Type: ${m.kind} | Provider: ${m.provider} | Cap: ${m.capability} | <span class="model-status-${m.status}">${m.status}</span></div>`;
+                    if (m.path) html += `<div class="model-cap">Path: ${m.path}</div>`;
+                    if (m.description) html += `<div class="model-cap">${m.description}</div>`;
+                    if (m.size_mb) html += `<div class="model-cap">Size: ${m.size_mb} MB</div>`;
+                    html += `</div>`;
+                });
+            }
+            document.getElementById('models-container').innerHTML = html;
+        } catch (err) {
+            document.getElementById('models-container').innerHTML = `<div class="model-cap">Error: ${err.message}</div>`;
+        }
+    }
+
+    async function loadProviders() {
+        try {
+            const providers = await fetchJSON('/api/models/providers');
+            let html = '';
+            if (providers.length === 0) {
+                html = '<div class="model-cap">No providers configured.</div>';
+            } else {
+                html = '<div class="model-cap">Active providers: ' + providers.join(', ') + '</div>';
+            }
+
+            const gpuInfo = await fetchJSON('/api/gpu').catch(() => null);
+            if (gpuInfo && gpuInfo.available) {
+                html += '<div style="margin-top:5px;"><span class="status-pass">GPU Ready</span> - Backend: ' + gpuInfo.backend + '</div>';
+            } else {
+                html += '<div style="margin-top:5px;"><span class="status-fail">No GPU</span> - CPU only</div>';
+            }
+
+            const llamaStatus = await fetchJSON('/api/llamacpp').catch(() => null);
+            if (llamaStatus && llamaStatus.server_running) {
+                html += '<div style="margin-top:5px;"><span class="status-pass">llama.cpp Server Running</span></div>';
+            } else if (llamaStatus && llamaStatus.installed) {
+                html += '<div style="margin-top:5px;"><span class="badge-proposed">llama.cpp Installed (server stopped)</span></div>';
+            } else {
+                html += '<div style="margin-top:5px;"><span class="badge-failed">llama.cpp Not Installed</span></div>';
+            }
+
+            document.getElementById('providers-container').innerHTML = html;
+        } catch (err) {
+            document.getElementById('providers-container').innerHTML = `<div class="model-cap">Error: ${err.message}</div>`;
+        }
+    }
+
+    async function scanGGUF() {
+        const path = document.getElementById('scan-path').value.trim();
+        if (!path) {
+            document.getElementById('scan-results').innerHTML = '<div class="model-cap">Please enter a path.</div>';
+            return;
+        }
+        document.getElementById('scan-results').innerHTML = '<div class="model-cap"><span class="spinner"></span> Scanning...</div>';
+        try {
+            const models = await fetchJSON(`/api/models/scan?path=${encodeURIComponent(path)}`);
+            let html = `<div class="model-cap">Found ${models.length} GGUF models:</div>`;
+            models.forEach(m => {
+                html += `<div class="model-card">`;
+                html += `<div class="model-name">${m.name}</div>`;
+                html += `<div class="model-cap">Cap: ${m.capability} | Size: ${m.size_mb} MB | Path: ${m.path}</div>`;
+                html += `<button class="btn-small" onclick="addGGUFModel('${encodeURIComponent(m.path)}')">Add to registry</button>`;
+                html += `</div>`;
+            });
+            if (models.length === 0) {
+                html += '<div class="model-cap">No .gguf files found.</div>';
+            }
+            document.getElementById('scan-results').innerHTML = html;
+        } catch (err) {
+            document.getElementById('scan-results').innerHTML = `<div class="model-cap">Error: ${err.message}</div>`;
+        }
+    }
+
+    async function searchHF() {
+        const query = document.getElementById('hf-query').value.trim();
+        if (!query) {
+            document.getElementById('hf-results').innerHTML = '<div class="model-cap">Please enter a query.</div>';
+            return;
+        }
+        document.getElementById('hf-results').innerHTML = '<div class="model-cap"><span class="spinner"></span> Searching HuggingFace...</div>';
+        try {
+            const models = await fetchJSON(`/api/models/hf-search?q=${encodeURIComponent(query)}&limit=20`);
+            let html = `<div class="model-cap">Found ${models.length} models:</div>`;
+            models.forEach(m => {
+                html += `<div class="model-card">`;
+                html += `<div class="model-name">${m.name}</div>`;
+                html += `<div class="model-cap">Status: ${m.status} | Tags: ${m.tags ? m.tags.join(', ') : 'none'}</div>`;
+                html += `</div>`;
+            });
+            document.getElementById('hf-results').innerHTML = html;
+        } catch (err) {
+            document.getElementById('hf-results').innerHTML = `<div class="model-cap">Error: ${err.message}</div>`;
+        }
+    }
+
+    async function addProvider() {
+        const name = document.getElementById('provider-name').value.trim();
+        const ptype = document.getElementById('provider-type').value;
+        const url = document.getElementById('provider-url').value.trim();
+        const token = document.getElementById('provider-token').value.trim();
+        if (!name) {
+            alert('Provider name is required');
+            return;
+        }
+        const extra = {};
+        if (ptype === 'huggingface') extra.model = 'gpt2';
+        if (ptype === 'gguf') extra.model_path = '';
+        try {
+            await fetchJSON('/api/models/add-provider', {
+                method: 'POST',
+                body: JSON.stringify({ name, type: ptype, url, token, extra })
+            });
+            alert(`Provider ${name} (${ptype}) added`);
+            loadProviders();
+            loadModels();
+        } catch (err) {
+            alert(`Error: ${err.message}`);
+        }
+    }
+
+    async function addGGUFModel(path) {
+        try {
+            await fetchJSON(`/api/models/gguf-add?path=${path}`, { method: 'POST' });
+            alert(`Added GGUF model`);
+            loadModels();
+        } catch (err) {
+            alert(`Error: ${err.message}`);
+        }
+    }
+
+    async function loadGPUInfo() {
+        try {
+            const info = await fetchJSON('/api/gpu');
+            let html = '';
+            if (info.available) {
+                html += `<div class="metric"><span class="label">Backend</span><span class="value">${info.backend}</span></div>`;
+                html += `<div class="metric"><span class="label">Vendor</span><span class="value">${info.vendor}</span></div>`;
+                html += `<div class="metric"><span class="label">Device</span><span class="value">${info.device}</span></div>`;
+                html += `<div class="metric"><span class="label">VRAM</span><span class="value">${info.vram_mb} MB</span></div>`;
+                html += `<div class="metric"><span class="label">GPU Layers</span><span class="value">${info.n_gpu_layers}</span></div>`;
+            } else {
+                html = '<div class="model-cap">No GPU detected. Running on CPU.</div>';
+            }
+            document.getElementById('gpu-container').innerHTML = html;
+        } catch (err) {
+            document.getElementById('gpu-container').innerHTML = `<div class="model-cap">Error: ${err.message}</div>`;
+        }
+    }
+
+    async function loadLlamaCppStatus() {
+        try {
+            const status = await fetchJSON('/api/llamacpp');
+            let html = '';
+            html += `<div class="metric"><span class="label">Installed</span><span class="value ${status.installed ? 'status-pass' : 'status-fail'}">${status.installed ? 'Yes' : 'No'}</span></div>`;
+            if (status.version) html += `<div class="metric"><span class="label">Version</span><span class="value">${status.version}</span></div>`;
+            if (status.path) html += `<div class="metric"><span class="label">Path</span><span class="value">${status.path}</span></div>`;
+            if (status.message) html += `<div class="model-cap">${status.message}</div>`;
+            document.getElementById('llamacpp-container').innerHTML = html;
+        } catch (err) {
+            document.getElementById('llamacpp-container').innerHTML = `<div class="model-cap">Error: ${err.message}</div>`;
+        }
+    }
+
+    async function loadDownloadedModels() {
+        try {
+            const models = await fetchJSON('/api/models/downloaded');
+            let html = '';
+            if (models.length === 0) {
+                html = '<div class="model-cap">No models downloaded yet.</div>';
+            } else {
+                models.forEach(m => {
+                    html += `<div class="model-card">`;
+                    html += `<div class="model-name">${m.name}</div>`;
+                    html += `<div class="model-cap">Size: ${m.size_mb} MB | Status: ${m.status}</div>`;
+                    html += `<div class="model-cap">Path: ${m.path}</div>`;
+                    html += `<button class="btn-small" onclick="addGGUFModel('${encodeURIComponent(m.path)}')">Use in Spiral</button>`;
+                    html += `</div>`;
+                });
+            }
+            document.getElementById('downloaded-container').innerHTML = html;
+        } catch (err) {
+            document.getElementById('downloaded-container').innerHTML = `<div class="model-cap">Error: ${err.message}</div>`;
+        }
+    }
+
+    async function loadLlamaModel() {
+        const path = document.getElementById('llama-model-path').value.trim();
+        if (!path) {
+            alert('Model path is required');
+            return;
+        }
+        const layers = parseInt(document.getElementById('llama-gpu-layers').value) || 999;
+        try {
+            const resp = await fetchJSON('/api/llamacpp/load', {
+                method: 'POST',
+                body: JSON.stringify({ model_path: path, n_gpu_layers: layers })
+            });
+            alert(`llama.cpp server started! PID: ${resp.pid}`);
+            loadLlamaCppStatus();
+        } catch (err) {
+            alert(`Error: ${err.message}`);
+        }
+    }
+
+    checkDaemonMode();
+        try {
+            const snap = await fetchJSON('/api/snapshot');
+            const badge = document.getElementById('mode-badge');
+            if (snap.confidence !== undefined) {
+                badge.textContent = 'DAEMON MODE';
+                badge.style.color = '#0f0';
+            } else {
+                badge.textContent = 'SINGLE RUN MODE';
+                badge.style.color = '#888';
+            }
+        } catch (e) {
+            document.getElementById('mode-badge').textContent = 'UNKNOWN';
+        }
+    }
+
+    checkDaemonMode();
+    refresh();
+    loadRuns();
+    loadModels();
+    loadProviders();
+    loadGPUInfo();
+    loadLlamaCppStatus();
+    loadDownloadedModels();
+    setInterval(refresh, 5000);
+    setInterval(loadRuns, 10000);
+    setInterval(loadGPUInfo, 15000);
+    </script>
+</body>
+</html>
