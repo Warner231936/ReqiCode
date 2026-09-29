@@ -15,6 +15,7 @@ import (
 	"github.com/kilo/spiral-codemaker/core/causal"
 	"github.com/kilo/spiral-codemaker/core/converge"
 	"github.com/kilo/spiral-codemaker/core/events"
+	"github.com/kilo/spiral-codemaker/core/regression"
 	"github.com/kilo/spiral-codemaker/core/scheduler"
 	"github.com/kilo/spiral-codemaker/core/spiral"
 	"github.com/kilo/spiral-codemaker/core/state"
@@ -236,6 +237,20 @@ func (o *Orchestrator) Run() error {
 		// maxIterations as a principled stopping rule.
 		assessment := o.observeAndAssess()
 		o.pendingAssessment = assessment
+
+		// Seal this revision into the tamper-evident chain before deciding
+		// whether to continue. Sealing first means the decision to stop is itself
+		// recorded; otherwise the final revision would be unchained and therefore
+		// the one revision a mutator could edit for free.
+		if _, err := o.semiState.AppendChained(string(assessment.Phase) + ": " + assessment.Reason); err != nil {
+			o.semiState.AddEvidence(state.Evidence{
+				Type:      state.EvidenceObservation,
+				Content:   "chain append failed: " + err.Error(),
+				Strength:  state.ConfidenceHigh,
+				Provenance: state.NewProvenance("state-chain"),
+			})
+		}
+
 		if assessment.ShouldStop {
 			break
 		}
@@ -243,7 +258,83 @@ func (o *Orchestrator) Run() error {
 
 	o.attention.SyncToSemiState(o.semiState)
 	o.finalizeInstrumentation()
+	o.runRegressionGate()
 	return nil
+}
+
+// runRegressionGate pins a canonical projection of this run against a committed
+// baseline and blocks on drift.
+//
+// This runs on every execution, not only in tests, because the whole point is
+// that a self-edit cannot slip through because nobody remembered to run the
+// suite. The gate is the enforcement mechanism; the test suite is a
+// convenience on top of it.
+func (o *Orchestrator) runRegressionGate() {
+	gate := regression.NewGate(o.baselineDir())
+	proj := regression.Project(o.scenarioName(), o.semiState)
+
+	// A run with an LLM attached is not reproducible at the token level, so its
+	// projection legitimately varies. Gating it would produce noise that trains
+	// people to ignore the gate, which is worse than not having one. The
+	// deterministic template path is the one worth pinning.
+	if o.config != nil && o.config.Debug {
+		return
+	}
+	if _, isLLM := o.llmInUse(); isLLM {
+		o.semiState.AddEvidence(state.Evidence{
+			Type:     state.EvidenceObservation,
+			Content:  "regression gate skipped: LLM output is not token-reproducible, pinning it would gate on noise",
+			Strength: state.ConfidenceLow,
+			Provenance: state.NewProvenance("regression-gate"),
+		})
+		return
+	}
+
+	verdict := gate.Check(proj)
+	if verdict.Pass {
+		o.semiState.AddEvidence(state.Evidence{
+			Type:      state.EvidenceObservation,
+			Content:   "regression gate: " + verdict.Summary,
+			Strength:  state.ConfidenceHigh,
+			Provenance: state.NewProvenance("regression-gate"),
+		})
+		return
+	}
+
+	o.semiState.AddEvidence(state.Evidence{
+		Type:     state.EvidenceAnalysis,
+		Content:  "regression gate FAILED:\n" + regression.FormatVerdicts([]regression.Verdict{verdict}),
+		Strength: state.ConfidenceCertain,
+		Provenance: state.NewProvenance("regression-gate"),
+	})
+	o.attention.Boost("critic", "regression detected, review required", 0.8)
+}
+
+func (o *Orchestrator) baselineDir() string {
+	return filepath.Join(o.config.OutputPath, "baseline")
+}
+
+func (o *Orchestrator) scenarioName() string {
+	if o.config == nil || o.config.ProjectRoot == "" {
+		return "default"
+	}
+	return "run"
+}
+
+// llmInUse reports whether a non-mock provider is wired, which is what makes a
+// run non-reproducible.
+func (o *Orchestrator) llmInUse() (any, bool) {
+	if o.router == nil {
+		return nil, false
+	}
+	for _, m := range []routing.ModelCapability{
+		routing.CapReasoning, routing.CapSpecialize, routing.CapFast,
+	} {
+		if _, name, ok := o.router.GetProvider(m); ok && name != "" && name != "mock" {
+			return name, true
+		}
+	}
+	return nil, false
 }
 
 // observeAndAssess runs the Phase 0 measurement pass for the current revision.
@@ -314,8 +405,12 @@ func (o *Orchestrator) finalizeInstrumentation() {
 		// Test results are included so the exact command that produced each
 		// outcome is auditable. Attribution claims are only meaningful if the
 		// ground-truth measurement is inspectable.
-		"test_results": o.semiState.GetTestResults(),
-		"race_enabled": o.semiStateRaceEnabled,
+		"test_results":   o.semiState.GetTestResults(),
+		"race_enabled":   o.semiStateRaceEnabled,
+		// The chain is the audit record. It is written out so the hash history
+		// survives the process and can be verified later.
+		"chain":          o.semiState.Chain(),
+		"chain_verify":   o.semiState.VerifyChain(),
 	}
 
 	data, err := json.MarshalIndent(report, "", "  ")

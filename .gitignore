@@ -30,6 +30,11 @@ coverage.out
 .DS_Store
 Thumbs.db
 
+# llama.cpp server logs
+llama-*.log
+llama-*.err
+*.pid
+
 # Go
 *.test
 *.out

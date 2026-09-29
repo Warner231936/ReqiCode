@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/kilo/spiral-codemaker/api"
+	"github.com/kilo/spiral-codemaker/core/regression"
+	"github.com/kilo/spiral-codemaker/core/state"
 	"github.com/kilo/spiral-codemaker/core/system"
 	"github.com/kilo/spiral-codemaker/models/registry"
 	"github.com/kilo/spiral-codemaker/models/routing"
@@ -27,6 +29,8 @@ func main() {
 	switch cmd {
 	case "run":
 		cmdRun(args)
+	case "baseline":
+		cmdBaseline(args)
 	case "dashboard":
 		cmdDashboard(args)
 	case "daemon":
@@ -47,6 +51,80 @@ func main() {
 		fmt.Printf("Unknown command: %s\n\n", cmd)
 		printUsage()
 		os.Exit(1)
+	}
+}
+
+// cmdBaseline captures and checks regression baselines.
+//
+// Capture is deliberately an explicit CLI verb rather than something a run does
+// automatically. Auto-capturing would silently promote every behaviour change to
+// "expected", which is exactly how a gate stops gating.
+func cmdBaseline(args []string) {
+	fs := flag.NewFlagSet("baseline", flag.ExitOnError)
+	action := fs.String("action", "check", "capture | check")
+	dir := fs.String("dir", "testdata/baseline", "baseline directory")
+	scenario := fs.String("scenario", "http-todo", "scenario name (http-todo | http-resource | cli-filelist)")
+	fs.Parse(args)
+
+	gate := regression.NewGate(*dir)
+
+	switch *action {
+	case "capture":
+		ss := buildScenarioState(*scenario)
+		proj := regression.Project(*scenario, ss)
+		if err := gate.Capture(proj); err != nil {
+			fmt.Printf("Error capturing baseline: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Captured baseline %q: %d files, %d decisions, %d test outcomes -> %s\n",
+			*scenario, len(proj.Files), len(proj.Decisions), len(proj.TestOutcomes), gate.Path(*scenario))
+		fmt.Println("This is now the expected behaviour. Review the diff before committing.")
+
+	case "check":
+		ss := buildScenarioState(*scenario)
+		proj := regression.Project(*scenario, ss)
+		verdict := gate.Check(proj)
+		fmt.Print(regression.FormatVerdicts([]regression.Verdict{verdict}))
+		if !verdict.Pass {
+			os.Exit(1)
+		}
+
+	default:
+		fmt.Println("unknown action; use capture or check")
+		os.Exit(1)
+	}
+}
+
+// buildScenarioState runs the deterministic template pipeline for a scenario,
+// with no LLM attached so its projection is stable enough to pin.
+func buildScenarioState(scenario string) *state.SemiState {
+	dir, err := os.MkdirTemp("", "spiral-baseline-*")
+	if err != nil {
+		fmt.Printf("Error creating temp dir: %v\n", err)
+		os.Exit(1)
+	}
+	defer os.RemoveAll(dir)
+
+	orch, err := system.NewOrchestrator("", dir, scenarioIntent(scenario), 1)
+	if err != nil {
+		fmt.Printf("Error creating orchestrator: %v\n", err)
+		os.Exit(1)
+	}
+	if err := orch.Run(); err != nil {
+		fmt.Printf("Error running orchestrator: %v\n", err)
+		os.Exit(1)
+	}
+	return orch.SemiState()
+}
+
+func scenarioIntent(scenario string) string {
+	switch scenario {
+	case "cli-filelist":
+		return "Create a Go CLI tool that lists files in a directory recursively"
+	case "http-resource":
+		return "Create a Go HTTP service with REST API for managing resources"
+	default:
+		return "Build a small HTTP service that stores TODO items."
 	}
 }
 

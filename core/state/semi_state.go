@@ -27,6 +27,11 @@ type SemiState struct {
 	ArchitecturePlan  *ArchitecturePlan    `json:"architecture_plan,omitempty"`
 	GeneratedFiles    map[string]FileEntry  `json:"generated_files"`
 	Objections        []Objection           `json:"objections"`
+
+	// chain is the tamper-evident revision history. Unexported because it is
+	// integrity metadata, not user-facing state: letting callers mutate it
+	// directly would defeat the property it exists to provide.
+	chain []ChainNode
 }
 
 type FileEntry struct {
@@ -404,6 +409,10 @@ func (s *SemiState) Clone() *SemiState {
 		Requirements:    append([]Requirement{}, s.Requirements...),
 		GeneratedFiles:  make(map[string]FileEntry),
 		Objections:      append([]Objection{}, s.Objections...),
+		// The chain must survive a clone. Dropping it would let a caller fork
+		// the state and shed its history, which is precisely the tampering the
+		// chain exists to prevent.
+		chain: append([]ChainNode{}, s.chain...),
 	}
 	for k, v := range s.AttentionMap {
 		clone.AttentionMap[k] = v

@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "name": "cli-filelist",
+  "confidence": 0.75,
+  "requirements": [
+    "req-001|File system traversal and listing: Create a Go CLI tool that lists files in a directory recursively"
+  ],
+  "plan": {
+    "description": "Go CLI tool using standard library",
+    "alt": "plan-template-cli",
+    "components": [
+      "core|pkg/core/core.go|Core business logic",
+      "main|cmd/cli/main.go|Application entry point with CLI argument parsing"
+    ],
+    "endpoints": null
+  },
+  "files": [
+    "README.md",
+    "cmd/cli/main.go",
+    "go.mod",
+    "pkg/core/core.go",
+    "pkg/core/core_test.go"
+  ],
+  "decisions": [
+    "dec-arch-template|plan-template-cli"
+  ],
+  "hypotheses": [
+    "hyp-arch-plan-alt-plan-template-cli|PROPOSED|Alternative architecture plan-alt-plan-template-cli would satisfy the requirements: Go application as a single package rather than a layered layout",
+    "hyp-arch-plan-template-cli|ACCEPTED|Architecture plan-template-cli satisfies the requirements: Go CLI tool using standard library"
+  ],
+  "proposals": [
+    "README.md|CREATE|APPROVED",
+    "cmd/cli/main.go|CREATE|APPROVED",
+    "pkg/core/core.go|CREATE|APPROVED",
+    "pkg/core/core_test.go|CREATE|APPROVED"
+  ],
+  "test_outcomes": [
+    "PASSED|"
+  ],
+  "evidence_kinds": {
+    "analysis": 5,
+    "code_review": 1,
+    "observation": 23,
+    "test_pass": 1
+  },
+  "finding_states": {
+    "SUPPORTED": 3
+  },
+  "conflict_count": 0,
+  "chain_head": "d7fece29c596156b83cb748a3fd472dfb11880d4e687095239b6ec7f8a737195"
+}

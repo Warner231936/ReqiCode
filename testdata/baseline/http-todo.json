@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "name": "http-todo",
+  "confidence": 0.75,
+  "requirements": [
+    "req-001|HTTP API endpoints for resource management",
+    "req-002|Store TODO items with create/read/update/delete operations",
+    "req-003|Persistent storage for data items"
+  ],
+  "plan": {
+    "description": "Go HTTP server using net/http with in-memory store",
+    "alt": "plan-template-http",
+    "components": [
+      "handlers|internal/handlers/resource.go|HTTP request handlers for resource management",
+      "main|cmd/server/main.go|Application entry point, HTTP server setup",
+      "model|internal/model/resource.go|Resource data structures",
+      "store|internal/store/store.go|Thread-safe in-memory storage"
+    ],
+    "endpoints": [
+      "DELETE /resources/{id}",
+      "GET /resources",
+      "GET /resources/{id}",
+      "POST /resources",
+      "PUT /resources/{id}"
+    ]
+  },
+  "files": [
+    "README.md",
+    "cmd/server/main.go",
+    "go.mod",
+    "internal/handlers/handlers_test.go",
+    "internal/handlers/resource.go",
+    "internal/model/resource.go",
+    "internal/store/store.go",
+    "internal/store/store_test.go"
+  ],
+  "decisions": [
+    "dec-arch-template|plan-template-http"
+  ],
+  "hypotheses": [
+    "hyp-arch-plan-alt-plan-template-http|PROPOSED|Alternative architecture plan-alt-plan-template-http would satisfy the requirements: Go application with file-backed persistence instead of in-memory state",
+    "hyp-arch-plan-template-http|ACCEPTED|Architecture plan-template-http satisfies the requirements: Go HTTP server using net/http with in-memory store"
+  ],
+  "proposals": [
+    "README.md|CREATE|APPROVED",
+    "cmd/server/main.go|CREATE|APPROVED",
+    "internal/handlers/handlers_test.go|CREATE|APPROVED",
+    "internal/handlers/resource.go|CREATE|APPROVED",
+    "internal/model/resource.go|CREATE|APPROVED",
+    "internal/store/store.go|CREATE|APPROVED",
+    "internal/store/store_test.go|CREATE|APPROVED"
+  ],
+  "test_outcomes": [
+    "PASSED|"
+  ],
+  "evidence_kinds": {
+    "analysis": 5,
+    "code_review": 1,
+    "observation": 23,
+    "test_pass": 1
+  },
+  "finding_states": {
+    "SUPPORTED": 3
+  },
+  "conflict_count": 0,
+  "chain_head": "83f90620f24d1421700c663d723d3f396d6689d7e9979e455f4fda8be0df88b2"
+}

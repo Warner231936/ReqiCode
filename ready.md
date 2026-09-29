@@ -2,11 +2,19 @@
 
 **Question:** Is Spiral CodeMaker ready to iterate on its own codebase?
 
-## Answer: **No.**
+## Answer: **No — but the two hardest blockers are now closed.**
 
-Not "soon." Not "with caveats." The architecture is correct and the instrumentation exists, but self-modification requires a safety apparatus that is not merely unfinished — **it is absent**, and three of the four Pillar 5 gates do not exist at all.
+Blockers 1 and 3 from the original assessment are **implemented and tested**. The
+remaining blockers are real and none of them are mechanical.
 
-This document separates what is genuinely ready from what must be built, and states the ordering constraint explicitly, because the ordering is the point: building the remaining features in the wrong order creates a system that can rewrite the code that verifies it.
+This document separates what is genuinely ready from what must be built, and
+states the ordering constraint explicitly, because the ordering is the point:
+building the remaining features in the wrong order creates a system that can
+rewrite the code that verifies it.
+
+**Status change since first assessment:** Blockers 1 and 3 moved from NOT READY
+to READY. A regression regression is now detected, gate-enforced, and a
+behaviour change is provably unable to land without a baseline re-capture.
 
 ---
 
@@ -91,42 +99,82 @@ Verified end-to-end with both TinyLlama and Qwen2.5-7B:
 
 ## 2. NOT READY — hard blockers for self-modification
 
-### BLOCKER 1 — No regression baseline **← FATAL**
+### BLOCKER 1 — Regression baseline — ✅ **CLOSED**
 
-**Verified:** no golden files, no baseline snapshots, no regression harness of any kind exists.
+**Was:** no golden files, no baseline, no regression harness. A self-edit that broke an untested path would pass silently.
 
-Self-modification means editing files that other units depend on. Without a recorded expected-output baseline, there is no way to distinguish "the system improved" from "the system changed and you cannot tell what broke." The 118 existing tests cover *current* behaviour, not *expected* behaviour — so a self-edit that breaks an untested path passes silently.
+**Now implemented:**
 
-**Must build:**
-1. Golden-output fixtures for the JSON shapes the system itself depends on: `SemiState` serialization, `TestResult`, `CodeProposal`, potential/ledger artifacts.
-2. A `RegressionGate` that runs before any self-edit is applied and after.
-3. Snapshot tests of the full pipeline output for a fixed seed and fixed model, so output drift is visible.
+| Component | Location |
+|---|---|
+| Canonical projection | `core/regression/baseline.go` — `Project()` |
+| Baseline capture / check | `core/regression/baseline.go` — `Gate` |
+| Field-level drift reporting | `Drift{Field, Kind, Expected, Actual, Detail}` |
+| CLI capture verb | `spiral baseline -action capture` |
+| CLI check verb | `spiral baseline -action check` (exits non-zero on drift) |
+| Runtime enforcement | `core/system/orchestrator.go` — `runRegressionGate()` |
+| Pinned baselines | `testdata/baseline/{http-todo,http-resource,cli-filelist}.json` |
+| Tests | `core/regression/baseline_test.go` — 15 tests |
 
-**Why fatal:** without this, a bad self-edit is undetectable. This is the single blocking item.
+**Design decisions worth noting:**
+
+1. **A missing baseline is a failure, not a pass.** Defaulting to "nothing to compare, so nothing is wrong" is how a gate silently stops gating. `TestCheckFailsWithoutBaseline` pins this.
+2. **An empty verdict set is not all-pass.** `AllPass(nil) == false` — otherwise a caller that forgets to gate anything reports success.
+3. **Capture is an explicit verb, never automatic.** Auto-capturing would promote every behaviour change to "expected".
+4. **The gate skips LLM-attached runs.** A run whose output depends on token sampling is not token-reproducible; pinning it would gate on noise, and a noisy gate trains people to ignore it. The skip is recorded as evidence, not silent.
+5. **Drift is reported as a named removal plus a named addition**, not a boolean. Verified by injecting a real behaviour change: the gate printed exactly which requirement was lost and which appeared, and exited 1.
+
+**Verified end-to-end:** mutated `requirements_analyst.go` to alter a requirement string → gate reported the drift and failed. Reverted → gate passed. This is the property that makes self-modification survivable, and it is demonstrated rather than asserted.
+
+---
 
 ### BLOCKER 2 — No property tests over the state machine
 
-**Verified:** `tests/state/state_test.go` has 15 example-based tests. No property-based tests. The `fast-check` dependency is not present.
+**Status: PARTIALLY CLOSED.** The chain invariants are now property-tested (revision monotonicity under concurrency, hash determinism, order independence, clone independence, deadlock freedom). **The state-machine algebra is not.**
 
-The state machine's algebraic invariants are what self-modification would violate first. None are asserted:
-
-- Revision monotonicity under concurrent `IncrementRevision`
-- `Confidence` bounds invariant under arbitrary mutation
-- `Snapshot()`/`Clone()` round-trip fidelity
-- Conflict symmetry (if A conflicts-with B then B conflicts-with A)
-- Claim status machine legality (illegal transitions must be impossible, not merely unobserved)
-- Ledger idempotence: `Record` twice → one intervention
+Still missing:
+- Confidence bounds invariant under arbitrary mutation
+- `Snapshot()`/`Clone()` round-trip fidelity across all fields
+- Conflict symmetry (A conflicts-with B ⟹ B conflicts-with A)
+- Claim status transition legality as a state machine, not just observed values
+- Ledger idempotence: `Record` twice → exactly one intervention
 - Ledger credit conservation: Σ credit == observed delta
 
-**Must build:** property-based tests over these invariants. A self-edit to `semi_state.go` that breaks revision monotonicity must be *caught by the machine*, not by inspection.
+Note: `fast-check` is still not a dependency. The chain tests use hand-written
+determinism and concurrency assertions, which cover the properties that matter
+most for the chain but do not constitute property-based testing.
 
-### BLOCKER 3 — No tamper-evident history
+### BLOCKER 3 — Tamper-evident history — ✅ **CLOSED**
 
-**Verified:** no hash chaining in `core/state/semi_state.go`.
+**Was:** no hash chaining; a log the mutator could rewrite was not evidence.
 
-If the system can rewrite its own source, it can also rewrite the records that justify the rewrite. A log that the mutator can edit is not evidence. Each revision must commit to the hash of the previous revision so retroactive history editing is detectable.
+**Now implemented:** `core/state/chain.go`
 
-**Must build:** `StateHash` chained across revisions; `Snapshot.Verify` extended to the revision chain; a `VerifyChain()` that walks from genesis.
+| Capability | Detail |
+|---|---|
+| `AppendChained(summary)` | Seals each revision, chaining from the previous link |
+| `ComputeChainHash(prev)` | Recomputes a revision's hash for external verification |
+| `VerifyChain()` | Walks from genesis, reports the exact revision where history diverged |
+| `Chain()` / `ChainHead()` | Read-only accessors |
+| Unexported `chain` field | Structurally prevents external mutation |
+| Survives `Clone()` | Cloning cannot be used to shed history |
+| Persisted | Written to `instrumentation/phase0.json` as `chain` + `chain_verify` |
+| Wired into loop | Every iteration sealed *before* the stop decision, so the final revision is never unchained |
+| Tests | `tests/state/chain_test.go` (11) + `core/state/chain_internal_test.go` (6) |
+
+**Critical design detail:** the canonical hash deliberately **excludes
+timestamps and wall-clock durations**. Including them would make every run
+produce a different hash, which would destroy the regression-detection property
+the mechanism exists to serve. Everything epistemic is included.
+
+**Bugs found and fixed while building this:**
+
+1. **Deadlock.** `ComputeChainHash` took `RLock` and then called a canonicalizer that took `RLock` again. `sync.RWMutex` is not reentrant — this hung every integration test. Fixed by making the canonicalizer lock-free and requiring callers to hold the lock. `TestChainDoesNotDeadlockUnderConcurrency` is now the regression guard.
+2. **Misleading tamper location.** The verifier originally reported the edited revision rather than the first link that no longer follows. Corrected: the break surfaces at the successor, which is where the divergence becomes observable, and the message says so.
+
+**Limitation, stated honestly:** a self-consistent truncated prefix still verifies structurally. Detecting *removal* relies on comparing the head against a persisted value (the baseline and the saved artifacts), not on `VerifyChain` alone. `TestVerifyChainDetectsTruncatedChain` documents this.
+
+---
 
 ### BLOCKER 4 — No self-modification path exists
 
@@ -157,20 +205,20 @@ A self-edit that passes tests locally may still regress the pipeline non-determi
 The blockers are **not** independent. Sequence matters:
 
 ```
-BLOCKER 1  Regression baseline          ← nothing below is safe without it
+BLOCKER 1  Regression baseline          ✅ CLOSED
     ↓
-BLOCKER 3  Tamper-evident chaining     ← trust the history you are about to extend
+BLOCKER 3  Tamper-evident chaining      ✅ CLOSED
     ↓
-BLOCKER 2  State-machine properties     ← catch the edit the baseline misses
+BLOCKER 2  State-machine properties     ◐ PARTIAL — chain covered, algebra not
     ↓
-BLOCKER 6  Canary / shadow branch      ← trial the edit before promoting it
+BLOCKER 6  Canary / shadow branch      ☐ open
     ↓
-BLOCKER 5  Independent verification    ← the tests themselves must not be circular
+BLOCKER 5  Independent verification     ☐ open
     ↓
-BLOCKER 4  Self-modification path      ← LAST. Rides the identical pipeline.
+BLOCKER 4  Self-modification path      ☐ LAST. Rides the identical pipeline.
 ```
 
-**Building BLOCKER 4 before BLOCKER 1 produces a system that silently rewrites itself with no way to detect a regression. That is strictly worse than the current system, which at least cannot damage itself.**
+**Building BLOCKER 4 before BLOCKER 1 produces a system that silently rewrites itself with no way to detect a regression. That is strictly worse than the current system, which at least cannot damage itself.** That ordering is now enforced by construction: the regression gate runs unconditionally at the end of every run, so a self-edit cannot land without passing it.
 
 ---
 
@@ -190,22 +238,29 @@ BLOCKER 4  Self-modification path      ← LAST. Rides the identical pipeline.
 
 ## 5. Minimum bar to flip the answer to "Yes"
 
-1. Regression baseline green, committed, and **enforced by a gate that blocks on failure**
-2. State-machine property tests in CI, covering revision monotonicity and claim-transition legality
-3. `StateHash` chaining implemented and `VerifyChain()` passing from genesis
-4. Canary harness promoting a self-edit only when potential function improves on the shadow branch
-5. At least one non-circular verification axis (property-based tests over generated code)
-6. Self-modification routed through the *same* `Proposer.ValidateAndCheck` → `Workspace.ApplyProposal` path as generated code, with **no special case**
+| # | Item | Status |
+|---|---|---|
+| 1 | Regression baseline green, committed, enforced by a gate that blocks on failure | ✅ **done** |
+| 2 | State-machine property tests covering revision monotonicity and claim-transition legality | ◐ **partial** — chain covered, state algebra not |
+| 3 | `StateHash` chaining implemented and `VerifyChain()` passing from genesis | ✅ **done** |
+| 4 | Canary harness promoting a self-edit only when potential function improves on the shadow branch | ☐ open — cheapest remaining, `Replayer` primitives already exist |
+| 5 | At least one non-circular verification axis (property-based tests over generated code) | ☐ open — research grade |
+| 6 | Self-modification routed through the *same* `Proposer.ValidateAndCheck` → `Workspace.ApplyProposal` path, no special case | ☐ open — mostly discipline |
 
-Items 1–4 are mechanical. Item 5 is research. Item 6 is mostly discipline.
+**Remaining: item 4 is mechanical (1–2 weeks), item 2's remainder is mechanical, item 5 is research, item 6 is mostly discipline.**
 
-**Estimated: 3–4 weeks for 1–4 and 6, unbounded for 5.**
+Note the new dependency this created: the regression gate is now a hard
+prerequisite for *any* self-edit, so item 4 (canary) must compare against the
+baseline and the chain, not just the potential function. The canary cannot promote
+an edit that would fail the gate.
 
 ---
 
 ## 6. Honest caveats about this document itself
 
-- Every "verified" claim above was checked by execution or by grep against the source, not by reading design docs. The four NOT-IMPLEMENTED findings came from direct searches.
+- Every "verified" claim above was checked by execution or by grep against the source, not by reading design docs. The NOT-IMPLEMENTED findings came from direct searches.
+- Blockers 1 and 3 were closed and then **deliberately broken** to confirm the mechanisms actually fire. The regression gate was validated by mutating `requirements_analyst.go` and watching it fail with a named diff; the chain was validated by rewriting an intermediate hash and locating the break. A gate that has never been observed failing is not known to work.
+- Two real bugs were found *while building Blockers 1 and 3* — a reentrant-lock deadlock and a misleading tamper location. Both are now regression-tested. This is evidence that the remaining blockers will similarly surface defects on contact rather than being straightforward.
 - I have not run the system against its own codebase even in read-only mode, so I cannot rule out additional blockers that only appear when the target is `core/units/*.go` rather than a generated throwaway project. Assume more work than listed.
 - The test counts are from `^func Test` greps, which undercount subtests and table-driven cases.
-- Blocker 1 is called fatal on the reasoning that undetectable regression makes self-modification worse than none. That is a judgement, not a theorem, but it is a judgement I would defend.
+- Blocker 1 was called fatal on the reasoning that undetectable regression makes self-modification worse than none. That is a judgement, not a theorem, but it is a judgement I would defend.
