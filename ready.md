@@ -176,6 +176,49 @@ the mechanism exists to serve. Everything epistemic is included.
 
 ---
 
+### BLOCKER 6 — Canary / shadow branch — ✅ **CLOSED**
+
+**Was:** a self-edit that passes tests locally can still regress the pipeline non-deterministically. No mechanism existed to trial an edit on a parallel branch.
+
+**Now implemented:** `core/canary/canary.go`
+
+| Capability | Detail |
+|---|---|
+| Isolated trial | Every branch builds in its own temp directory, deleted afterwards |
+| Reported workspace | The pipeline reports the workspace it populated; the canary does not guess |
+| Workspace containment | A runner reporting a workspace outside its trial dir is rejected — stops cross-trial contamination |
+| Build → edit → re-test | Ordering is load-bearing; applying the edit before the build would measure regeneration, not the artifact |
+| Real re-test | `WithWorkspaceTester` runs the actual test runner against the *edited* workspace |
+| Promotion rule | Gate passed, chain valid, pass rate not lower, potential delta above threshold |
+| No ties | A tie is not an improvement; threshold is 2× the potential's own epsilon |
+| Failure output retained | A blocked candidate prints the failure class and the tail of the test output |
+| CLI | `spiral canary -scenario X -file Y -content-file Z` |
+| Reports | Written to `instrumentation/canary/` |
+| Tests | 21 unit + 4 end-to-end against the real pipeline |
+
+**Four real bugs found and fixed while building this:**
+
+1. **The canary could not see its own edit.** It applied the edit, then measured the orchestrator's state — which describes the pipeline's own run and is blind to anything applied afterwards. Every candidate scored *identical* to its baseline. A canary that approves everything because it measured nothing is worse than no canary. Fixed by re-testing the edited workspace.
+2. **A broken test was promoted.** Caused by the same defect plus a path bug: the edit was applied before the orchestrator created the workspace, so `workspaceSubdir` fell back to the trial root and the file landed outside the Go module. The test suite never saw it. Fixed by having the runner report the workspace path and by asserting the edit lands inside the trial directory.
+3. **Multi-line content was corrupted in transit.** Passing Go source via `--content` on a command line loses newlines on Windows, so the written file did not compile. The resulting failure was indistinguishable from "the edit was wrong" — the worst time to be lied to. Fixed with `--content-file`, and inline multi-line content is now rejected with an explanation.
+4. **The canary blocked without saying why.** It reported "pass rate regressed" and discarded the test output. An operator cannot distinguish "the edit is wrong" from "the toolchain is misconfigured". Fixed by retaining the failure class and the output tail.
+
+**Verified end-to-end against the real pipeline and the real test runner:**
+
+| Trial | Result |
+|---|---|
+| Edit adds a passing test | **promote**, potential +0.1000 |
+| Edit adds a nil-deref panic | **blocked**, full stack trace shown |
+| Edit adds a syntax error | **blocked**, compile error shown |
+| No-op edit | **blocked** as a tie, explicitly |
+| Scratch cleanup | trial directories removed by default |
+
+The panic trial is the one that matters. It produced a stack trace pointing at
+`output/internal/store/broken_test.go:7` — proof the canary actually *exercised*
+the edit rather than rubber-stamping it.
+
+---
+
 ### BLOCKER 4 — No self-modification path exists
 
 **Verified:** no `SelfModify` / `ModifySelf` / canary / shadow-branch code anywhere in `core/`.
@@ -209,16 +252,16 @@ BLOCKER 1  Regression baseline          ✅ CLOSED
     ↓
 BLOCKER 3  Tamper-evident chaining      ✅ CLOSED
     ↓
-BLOCKER 2  State-machine properties     ◐ PARTIAL — chain covered, algebra not
+BLOCKER 6  Canary / shadow branch       ✅ CLOSED
     ↓
-BLOCKER 6  Canary / shadow branch      ☐ open
+BLOCKER 2  State-machine properties     ◐ PARTIAL — chain covered, algebra not
     ↓
 BLOCKER 5  Independent verification     ☐ open
     ↓
 BLOCKER 4  Self-modification path      ☐ LAST. Rides the identical pipeline.
 ```
 
-**Building BLOCKER 4 before BLOCKER 1 produces a system that silently rewrites itself with no way to detect a regression. That is strictly worse than the current system, which at least cannot damage itself.** That ordering is now enforced by construction: the regression gate runs unconditionally at the end of every run, so a self-edit cannot land without passing it.
+**Building BLOCKER 4 before BLOCKER 1 produces a system that silently rewrites itself with no way to detect a regression. That is strictly worse than the current system, which at least cannot damage itself.** That ordering is now enforced by construction: the regression gate runs unconditionally at the end of every run, and the canary refuses to promote a branch that fails the gate, so a self-edit cannot land without passing both.
 
 ---
 
@@ -243,24 +286,26 @@ BLOCKER 4  Self-modification path      ☐ LAST. Rides the identical pipeline.
 | 1 | Regression baseline green, committed, enforced by a gate that blocks on failure | ✅ **done** |
 | 2 | State-machine property tests covering revision monotonicity and claim-transition legality | ◐ **partial** — chain covered, state algebra not |
 | 3 | `StateHash` chaining implemented and `VerifyChain()` passing from genesis | ✅ **done** |
-| 4 | Canary harness promoting a self-edit only when potential function improves on the shadow branch | ☐ open — cheapest remaining, `Replayer` primitives already exist |
+| 4 | Canary harness promoting a self-edit only when the candidate beats the incumbent | ✅ **done** |
 | 5 | At least one non-circular verification axis (property-based tests over generated code) | ☐ open — research grade |
 | 6 | Self-modification routed through the *same* `Proposer.ValidateAndCheck` → `Workspace.ApplyProposal` path, no special case | ☐ open — mostly discipline |
 
-**Remaining: item 4 is mechanical (1–2 weeks), item 2's remainder is mechanical, item 5 is research, item 6 is mostly discipline.**
+**Remaining: item 2's remainder is mechanical (the state algebra), item 5 is research, item 6 is mostly discipline. Three of six gates are now closed and the fourth is half done.**
 
 Note the new dependency this created: the regression gate is now a hard
 prerequisite for *any* self-edit, so item 4 (canary) must compare against the
 baseline and the chain, not just the potential function. The canary cannot promote
-an edit that would fail the gate.
+an edit that would fail the gate. That is now implemented rather than merely
+noted.
 
 ---
 
 ## 6. Honest caveats about this document itself
 
 - Every "verified" claim above was checked by execution or by grep against the source, not by reading design docs. The NOT-IMPLEMENTED findings came from direct searches.
-- Blockers 1 and 3 were closed and then **deliberately broken** to confirm the mechanisms actually fire. The regression gate was validated by mutating `requirements_analyst.go` and watching it fail with a named diff; the chain was validated by rewriting an intermediate hash and locating the break. A gate that has never been observed failing is not known to work.
-- Two real bugs were found *while building Blockers 1 and 3* — a reentrant-lock deadlock and a misleading tamper location. Both are now regression-tested. This is evidence that the remaining blockers will similarly surface defects on contact rather than being straightforward.
+- Blockers 1, 3, and 6 were closed and then **deliberately broken** to confirm the mechanisms actually fire. The regression gate was validated by mutating `requirements_analyst.go`; the chain by rewriting an intermediate hash; the canary by injecting a panicking test and a syntax error. A gate that has never been observed failing is not known to work.
+- **Six real bugs were found *while building* Blockers 1, 3, and 6** — two lock/tamper-reporting defects in the chain, and four in the canary (including one where a broken test was promoted because the canary could not see its own edit). This is strong evidence that the two remaining blockers will similarly surface defects on contact rather than being straightforward, and it is the argument for building them in order.
+- The canary currently **authorises** promotion; it does not apply edits. That separation is deliberate — applying is a separate explicit step — but it means the end-to-end path from "canary approves" to "edit is in the codebase" does not exist yet.
 - I have not run the system against its own codebase even in read-only mode, so I cannot rule out additional blockers that only appear when the target is `core/units/*.go` rather than a generated throwaway project. Assume more work than listed.
 - The test counts are from `^func Test` greps, which undercount subtests and table-driven cases.
 - Blocker 1 was called fatal on the reasoning that undetectable regression makes self-modification worse than none. That is a judgement, not a theorem, but it is a judgement I would defend.

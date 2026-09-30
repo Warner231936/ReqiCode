@@ -10,9 +10,11 @@ import (
 	"time"
 
 	"github.com/kilo/spiral-codemaker/api"
+	"github.com/kilo/spiral-codemaker/core/canary"
 	"github.com/kilo/spiral-codemaker/core/regression"
 	"github.com/kilo/spiral-codemaker/core/state"
 	"github.com/kilo/spiral-codemaker/core/system"
+	"github.com/kilo/spiral-codemaker/execution/tests"
 	"github.com/kilo/spiral-codemaker/models/registry"
 	"github.com/kilo/spiral-codemaker/models/routing"
 )
@@ -31,6 +33,8 @@ func main() {
 		cmdRun(args)
 	case "baseline":
 		cmdBaseline(args)
+	case "canary":
+		cmdCanary(args)
 	case "dashboard":
 		cmdDashboard(args)
 	case "daemon":
@@ -126,6 +130,153 @@ func scenarioIntent(scenario string) string {
 	default:
 		return "Build a small HTTP service that stores TODO items."
 	}
+}
+
+// cmdCanary trials a proposed edit in isolation and reports whether it should be
+// promoted.
+//
+// The edit is expressed as a file operation rather than a patch, because the
+// point of the canary is to run the real operation, not a stand-in that could
+// diverge from what would really be applied.
+func cmdCanary(args []string) {
+	fs := flag.NewFlagSet("canary", flag.ExitOnError)
+	scenario := fs.String("scenario", "http-todo", "scenario to run (http-todo | http-resource | cli-filelist)")
+	gateDir := fs.String("gate", "testdata/baseline", "regression baseline directory")
+	target := fs.String("file", "", "file the edit writes (workspace-relative)")
+	content := fs.String("content", "", "inline content for the edit; prefer --content-file for anything multi-line")
+	contentFile := fs.String("content-file", "", "read the edit's content from this file")
+	from := fs.String("from", "", "copy the content of this existing workspace file")
+	name := fs.String("name", "", "edit name for the report")
+	iterations := fs.Int("iterations", 1, "iterations per branch")
+	scratch := fs.String("scratch", "", "scratch parent dir (default: system temp)")
+	keep := fs.Bool("keep-scratch", false, "retain trial directories for inspection")
+	fs.Parse(args)
+
+	if *target == "" && *from == "" {
+		fmt.Println("Error: provide --file (with --content) or --file (with --from)")
+		os.Exit(1)
+	}
+	editName := *name
+	if editName == "" {
+		editName = "edit-" + filepath.Base(*target)
+	}
+
+	// Content is read from a file rather than accepted inline for anything
+	// multi-line. Windows argument parsing does not preserve newlines in argv,
+	// so `--content "package x\n\nimport ..."` arrives at the process with its
+	// line structure mangled and the resulting file does not compile. That
+	// failure is indistinguishable from "the edit was wrong", which is the worst
+	// possible time to be lied to.
+	var editContent []byte
+	switch {
+	case *contentFile != "":
+		b, rerr := os.ReadFile(*contentFile)
+		if rerr != nil {
+			fmt.Printf("Error: cannot read --content-file: %v\n", rerr)
+			os.Exit(1)
+		}
+		editContent = b
+	case *content != "":
+		if strings.Contains(*content, "\n") {
+			fmt.Println("Error: --content spanning multiple lines is unreliable on Windows.")
+			fmt.Println("       Write the content to a file and use --content-file instead.")
+			os.Exit(1)
+		}
+		editContent = []byte(*content)
+	}
+
+	scratchParent := *scratch
+	if scratchParent == "" {
+		scratchParent = os.TempDir()
+	}
+	reportDir := filepath.Join("instrumentation", "canary")
+
+	runner := func(dir string) (*canary.BranchResult, error) {
+		orch, err := system.NewOrchestrator("", dir, scenarioIntent(*scenario), *iterations)
+		if err != nil {
+			return nil, err
+		}
+		if err := orch.Run(); err != nil {
+			return nil, err
+		}
+		// Report the workspace the orchestrator actually populated rather than
+		// assuming a layout. Assuming is what let an edit land outside the
+		// module and the trial score it as a no-op.
+		return &canary.BranchResult{
+			State:     orch.SemiState(),
+			Workspace: orch.WorkspacePath(),
+		}, nil
+	}
+
+	h := canary.NewHarness(*gateDir, scratchParent, runner).KeepScratch(*keep)
+
+	// Re-test the edited workspace with the real test runner. Without this the
+	// candidate would be measured from the pipeline's own state, which is blind
+	// to the edit and would score every candidate identical to its baseline.
+	h = h.WithWorkspaceTester(func(ws string) (state.TestResult, error) {
+		return tests.NewTestRunner(ws).WithRace(true).WithCoverage(true).RunAll(context.Background()), nil
+	})
+
+	fmt.Println("Running baseline branch (unmodified)...")
+	base, err := h.Baseline(*scenario)
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("  potential=%.4f pass=%.2f gate=%v chain=%v\n\n",
+		base.Potential, base.PassRate, base.GatePassed, base.ChainValid)
+
+	edit := canary.Edit{
+		Name: editName,
+		Apply: func(ws string) error {
+			// Paths are workspace-relative, so the caller names files the way
+			// they appear in the generated project.
+			data := editContent
+			if *from != "" {
+				b, rerr := os.ReadFile(filepath.Join(ws, filepath.FromSlash(*from)))
+				if rerr != nil {
+					return fmt.Errorf("read %s: %w", *from, rerr)
+				}
+				data = b
+			}
+			path := filepath.Join(ws, filepath.FromSlash(*target))
+			if merr := os.MkdirAll(filepath.Dir(path), 0o755); merr != nil {
+				return merr
+			}
+			return os.WriteFile(path, data, 0o644)
+		},
+	}
+
+	fmt.Printf("Running candidate branch (edit: %s -> %s)...\n", editName, *target)
+	cand, err := h.Trial(edit, *scenario)
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("  potential=%.4f pass=%.2f gate=%v chain=%v\n\n",
+		cand.Potential, cand.PassRate, cand.GatePassed, cand.ChainValid)
+
+	verdict := canary.Compare(base, cand)
+	fmt.Print(canary.FormatVerdict(verdict))
+
+	rep := canary.Report{
+		Scenario:  *scenario,
+		Baseline:  base,
+		Candidate: cand,
+		Verdict:   verdict,
+		Applied:   *target,
+		Timestamp: time.Now().Format(time.RFC3339),
+	}
+	if err := canary.Write(reportDir, rep); err != nil {
+		fmt.Printf("Warning: could not write canary report: %v\n", err)
+	} else {
+		fmt.Printf("report: %s\n", filepath.Join(reportDir, "canary-"+editName+".json"))
+	}
+
+	if !verdict.Promote {
+		os.Exit(1)
+	}
+	fmt.Println("\nNOTE: promotion is authorised, not applied. Applying the edit is a separate, explicit step.")
 }
 
 func printUsage() {

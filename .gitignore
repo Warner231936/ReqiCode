@@ -35,6 +35,9 @@ llama-*.log
 llama-*.err
 *.pid
 
+	# canary trial reports (regenerated every run)
+**/instrumentation/
+
 # Go
 *.test
 *.out
