@@ -264,15 +264,18 @@ func (s *SemiState) GetHypotheses() []Hypothesis {
 	return append([]Hypothesis{}, s.Hypotheses...)
 }
 
-func (s *SemiState) UpdateHypothesisStatus(id string, status HypothesisStatus) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for i := range s.Hypotheses {
-		if s.Hypotheses[i].ID == id {
-			s.Hypotheses[i].Status = status
-			s.Hypotheses[i].Provenance.Revision++
-		}
-	}
+// UpdateHypothesisStatus moves a hypothesis to a new status, enforcing the
+// lifecycle rules in lifecycle.go.
+//
+// The transition is validated rather than applied blindly. This is the method
+// every existing caller uses, so validating here is what makes the rule
+// unbypassable: a self-edit that adds a new caller still cannot resurrect a
+// dead claim, because the guard is in the state, not in the callers.
+//
+// The error is returned rather than swallowed. Callers that genuinely need to
+// force a status use SetHypothesisStatus and handle the refusal.
+func (s *SemiState) UpdateHypothesisStatus(id string, status HypothesisStatus) error {
+	return s.SetHypothesisStatus(id, status)
 }
 
 func (s *SemiState) GetTestResults() []TestResult {

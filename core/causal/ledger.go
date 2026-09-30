@@ -332,17 +332,26 @@ func scoreIntervention(iv *Intervention, cohortSize int) (credit, confidence flo
 	}
 
 	raw := gains - losses
-	// A large cohort means joint attribution: this intervention cannot
-	// distinguish its own contribution from its peers.
+
+	// Confidence is 1/cohortSize, floored so it is never exactly zero.
+	//
+	// An earlier version capped this at 0.5, on the reasoning that joint
+	// attribution can never be certain. That cap was wrong: it clamped a *solo*
+	// intervention to the same 0.5 as a two-member cohort, destroying the very
+	// signal the number exists to carry. A lone intervention with a clean
+	// before/after observation is fully attributable and should say so.
 	confidence = 1 / float64(max(cohortSize, 1))
-	if confidence > 0.5 {
-		confidence = 0.5
-	}
-	if confidence < 0.1 {
-		confidence = 0.1
+	if confidence < minAttributionConfidence {
+		confidence = minAttributionConfidence
 	}
 	return raw, confidence
 }
+
+// minAttributionConfidence keeps the score usable once the cohort grows past ten,
+// where 1/n becomes too small to compare meaningfully. It is a floor on
+// expressiveness, not a ceiling on honesty: a 20-way cohort still reports the
+// lowest confidence of any cohort size.
+const minAttributionConfidence = 0.05
 
 func priority(o Objective) float64 {
 	switch o {

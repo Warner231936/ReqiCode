@@ -2,7 +2,7 @@
 
 **Question:** Is Spiral CodeMaker ready to iterate on its own codebase?
 
-## Answer: **No — but the two hardest blockers are now closed.**
+## Answer: **No — but four of the six blockers are now closed.**
 
 Blockers 1 and 3 from the original assessment are **implemented and tested**. The
 remaining blockers are real and none of them are mechanical.
@@ -12,9 +12,12 @@ states the ordering constraint explicitly, because the ordering is the point:
 building the remaining features in the wrong order creates a system that can
 rewrite the code that verifies it.
 
-**Status change since first assessment:** Blockers 1 and 3 moved from NOT READY
-to READY. A regression regression is now detected, gate-enforced, and a
-behaviour change is provably unable to land without a baseline re-capture.
+**Status change since first assessment:** Blockers 1, 2, 3, and 6 have moved from
+NOT READY to READY. A behaviour change is now detected and gate-enforced; the
+state algebra is property-tested; history is tamper-evident; and every candidate
+edit is trialled in isolation before it can be promoted. What remains is
+non-circular verification (research) and the self-modification path itself, which
+must come last.
 
 ---
 
@@ -128,21 +131,52 @@ Verified end-to-end with both TinyLlama and Qwen2.5-7B:
 
 ---
 
-### BLOCKER 2 — No property tests over the state machine
+### BLOCKER 2 — No property tests over the state machine — ✅ **CLOSED**
 
-**Status: PARTIALLY CLOSED.** The chain invariants are now property-tested (revision monotonicity under concurrency, hash determinism, order independence, clone independence, deadlock freedom). **The state-machine algebra is not.**
+**Was:** 15 example tests, zero property tests, and no transition rules at all.
 
-Still missing:
-- Confidence bounds invariant under arbitrary mutation
-- `Snapshot()`/`Clone()` round-trip fidelity across all fields
-- Conflict symmetry (A conflicts-with B ⟹ B conflicts-with A)
-- Claim status transition legality as a state machine, not just observed values
-- Ledger idempotence: `Record` twice → exactly one intervention
-- Ledger credit conservation: Σ credit == observed delta
+**Dependency added:** `gopter` v0.2.11. Note: `leanovate/fast-check` does not exist as a Go repo (404 on `git ls-remote`); `gopter` is the generator library and is what the Java `fast-check` ports target.
 
-Note: `fast-check` is still not a dependency. The chain tests use hand-written
-determinism and concurrency assertions, which cover the properties that matter
-most for the chain but do not constitute property-based testing.
+**State algebra** — `tests/state/properties_test.go`, 200 runs per property:
+
+| Invariant | What it protects |
+|---|---|
+| Confidence bounded | `SetConfidence` never leaves [0,1] |
+| Revision monotonic | `IncrementRevision` strictly increases; other mutations never lower it |
+| Provenance non-negative | No artifact carries a negative revision |
+| Clone round-trip fidelity | Counts and revision preserved for every collection |
+| Clone independence | Mutating a clone never reaches the original |
+| Getters do not leak | Mutating a returned slice cannot reach internal state |
+| Chain content-addressing | Different content → different hash; identical content → identical hash |
+| Potential finite | Never NaN or infinity — NaN would silently disable every canary comparison |
+| Conflict counting additive | Every added conflict is retained |
+| `HasTestFiles` agreement | Matches whether any `_test.go` file exists |
+| `HasFailedTests` agreement | Matches the most recent result |
+| Concurrency | Appends are not lost; reads during writes never observe nonsense |
+
+**Claim lifecycle** — `core/state/lifecycle.go` + `tests/state/lifecycle_test.go`:
+
+`LegalHypothesisTransition` defines the rules, `SetHypothesisStatus` enforces them and returns `*TransitionError`, and the pre-existing `UpdateHypothesisStatus` now routes through it — so the guard lives in the state and **no caller, including a future self-edit, can bypass it**.
+
+```
+PROPOSED   → ACCEPTED | REJECTED | SUPERSEDED
+ACCEPTED   → REJECTED | SUPERSEDED        (never back to PROPOSED)
+REJECTED   → (terminal)
+SUPERSEDED → (terminal)
+```
+
+A refused transition is *reported*, not silently swallowed, and does not bump the claim's revision — history must not record changes that never happened.
+
+**Ledger algebra** — `core/causal/properties_test.go`:
+
+Record idempotence, distinct-proposal 1:1 mapping, credit sign follows direction, credit bounded, confidence == 1/cohortSize, token accounting exactly additive, objectives always finite and non-negative, strategy ranking a total order.
+
+**Two real bugs found, both by property tests:**
+
+1. **A vacuous property test.** My first claim-transition property compared the post-update status against the value it had just been set to, so it could never fail — it appeared to cover the invariant while asserting nothing. Rewritten to compare before against after. A property test that cannot fail is worse than no test, because it inflates apparent coverage.
+2. **The attribution confidence cap destroyed the signal it existed to carry.** `scoreIntervention` clamped confidence to 0.5, which made a *solo* intervention indistinguishable from a two-member cohort — both reported 0.5. The reasoning ("joint attribution can never be certain") was sound but the implementation over-applied it: a lone intervention with clean before/after evidence *is* fully attributable. Now `1/cohortSize`, floored at 0.05 for expressiveness only.
+
+Bug 2 is the argument for doing this work at all. That number was wrong, nothing detected it, and no example test would have — it took a property over a random cohort to shrink the counterexample to `n=1` and make it obvious.
 
 ### BLOCKER 3 — Tamper-evident history — ✅ **CLOSED**
 
@@ -254,7 +288,7 @@ BLOCKER 3  Tamper-evident chaining      ✅ CLOSED
     ↓
 BLOCKER 6  Canary / shadow branch       ✅ CLOSED
     ↓
-BLOCKER 2  State-machine properties     ◐ PARTIAL — chain covered, algebra not
+BLOCKER 2  State-machine properties     ✅ CLOSED
     ↓
 BLOCKER 5  Independent verification     ☐ open
     ↓
@@ -284,13 +318,13 @@ BLOCKER 4  Self-modification path      ☐ LAST. Rides the identical pipeline.
 | # | Item | Status |
 |---|---|---|
 | 1 | Regression baseline green, committed, enforced by a gate that blocks on failure | ✅ **done** |
-| 2 | State-machine property tests covering revision monotonicity and claim-transition legality | ◐ **partial** — chain covered, state algebra not |
+| 2 | State-machine property tests covering revision monotonicity and claim-transition legality | ✅ **done** |
 | 3 | `StateHash` chaining implemented and `VerifyChain()` passing from genesis | ✅ **done** |
 | 4 | Canary harness promoting a self-edit only when the candidate beats the incumbent | ✅ **done** |
 | 5 | At least one non-circular verification axis (property-based tests over generated code) | ☐ open — research grade |
 | 6 | Self-modification routed through the *same* `Proposer.ValidateAndCheck` → `Workspace.ApplyProposal` path, no special case | ☐ open — mostly discipline |
 
-**Remaining: item 2's remainder is mechanical (the state algebra), item 5 is research, item 6 is mostly discipline. Three of six gates are now closed and the fourth is half done.**
+**Remaining: item 5 (non-circular verification) is research, and item 6 (the self-modification path itself) is mostly discipline. Four of six gates are closed.**
 
 Note the new dependency this created: the regression gate is now a hard
 prerequisite for *any* self-edit, so item 4 (canary) must compare against the
@@ -304,7 +338,7 @@ noted.
 
 - Every "verified" claim above was checked by execution or by grep against the source, not by reading design docs. The NOT-IMPLEMENTED findings came from direct searches.
 - Blockers 1, 3, and 6 were closed and then **deliberately broken** to confirm the mechanisms actually fire. The regression gate was validated by mutating `requirements_analyst.go`; the chain by rewriting an intermediate hash; the canary by injecting a panicking test and a syntax error. A gate that has never been observed failing is not known to work.
-- **Six real bugs were found *while building* Blockers 1, 3, and 6** — two lock/tamper-reporting defects in the chain, and four in the canary (including one where a broken test was promoted because the canary could not see its own edit). This is strong evidence that the two remaining blockers will similarly surface defects on contact rather than being straightforward, and it is the argument for building them in order.
+- **Eight real bugs were found *while building* Blockers 1, 2, 3, and 6** — two lock/tamper-reporting defects in the chain, and four in the canary (including one where a broken test was promoted because the canary could not see its own edit, a property test that could not fail, and an attribution confidence cap that erased its own signal). This is strong evidence that the two remaining blockers will similarly surface defects on contact rather than being straightforward, and it is the argument for building them in order.
 - The canary currently **authorises** promotion; it does not apply edits. That separation is deliberate — applying is a separate explicit step — but it means the end-to-end path from "canary approves" to "edit is in the codebase" does not exist yet.
 - I have not run the system against its own codebase even in read-only mode, so I cannot rule out additional blockers that only appear when the target is `core/units/*.go` rather than a generated throwaway project. Assume more work than listed.
 - The test counts are from `^func Test` greps, which undercount subtests and table-driven cases.
