@@ -41,19 +41,35 @@ func (u *Architect) Run(ctx context.Context, semiState *state.SemiState, bus *ev
 		llmPlan, err := u.generatePlanFromLLM(ctx, reqText, reqs)
 		if err != nil {
 			semiState.AddEvidence(state.Evidence{
-				Type:      state.EvidenceObservation,
-				Content:   fmt.Sprintf("LLM architecture planning failed, using fallback: %s", err.Error()),
-				Strength:  state.ConfidenceLow,
+				Type:       state.EvidenceObservation,
+				Content:    fmt.Sprintf("LLM architecture planning failed, using fallback: %s", err.Error()),
+				Strength:   state.ConfidenceLow,
 				Provenance: state.NewProvenance(u.ID()),
 			})
 		} else {
 			plan = llmPlan
 			semiState.AddEvidence(state.Evidence{
-				Type:      state.EvidenceAnalysis,
-				Content:   fmt.Sprintf("LLM-generated architecture plan: %s", llmPlan.Description),
-				Strength:  state.ConfidenceHigh,
+				Type:       state.EvidenceAnalysis,
+				Content:    fmt.Sprintf("LLM-generated architecture plan: %s", llmPlan.Description),
+				Strength:   state.ConfidenceHigh,
 				Provenance: state.NewProvenance(u.ID()),
 			})
+
+			// Record the LLM call as an intervention so the ledger can credit it.
+			//
+			// Without this the model does work that never appears in the causal
+			// record, and the strategy ranking would systematically favour
+			// template generation simply because it is the only strategy with
+			// interventions attributed to it.
+			u.rt.Ledger.RecordModelCall(state.CodeProposal{
+				ID:              "prop-arch-llm",
+				File:            "architecture/plan.json",
+				Operation:       state.OpCreate,
+				Reason:          "LLM-proposed architecture plan",
+				OriginatingUnit: u.ID(),
+				ExpectedEffect:  "a valid architecture plan for the requirements",
+				Provenance:      state.NewProvenance(u.ID()),
+			}, "llm-plan", u.rt.LastLLMCall())
 		}
 	}
 
@@ -71,9 +87,9 @@ func (u *Architect) Run(ctx context.Context, semiState *state.SemiState, bus *ev
 	u.recordHypothesis(plan)
 
 	semiState.AddEvidence(state.Evidence{
-		Type:      state.EvidenceAnalysis,
-		Content:   fmt.Sprintf("produced architecture plan: %s", plan.Description),
-		Strength:  plan.Confidence,
+		Type:       state.EvidenceAnalysis,
+		Content:    fmt.Sprintf("produced architecture plan: %s", plan.Description),
+		Strength:   plan.Confidence,
 		Provenance: state.NewProvenance(u.ID()),
 	})
 
@@ -81,8 +97,8 @@ func (u *Architect) Run(ctx context.Context, semiState *state.SemiState, bus *ev
 	u.rt.Attention.Boost("synthesizer", "architecture plan ready for synthesis", 0.3)
 
 	bus.Publish(events.EventEvidenceAdded, u.ID(), events.PayloadForEvidence(state.Evidence{
-		Type:      state.EvidenceAnalysis,
-		Content:   "architecture design completed",
+		Type:       state.EvidenceAnalysis,
+		Content:    "architecture design completed",
 		Provenance: state.NewProvenance(u.ID()),
 	}))
 
@@ -114,7 +130,7 @@ Rules:
 - endpoints: empty array [] for non-HTTP tools
 - Use realistic Go file paths like cmd/app/main.go or pkg/core/file.go`, intent, reqList.String())
 
-	resp, err := u.rt.LLM.GenerateCode(ctx, routing.CapReasoning, prompt)
+	resp, err := u.rt.LLM.GeneratePlan(ctx, routing.CapReasoning, prompt)
 	if u.rt.Config.Debug {
 		fmt.Printf("[DEBUG] LLM architecture plan response:\n%s\n", resp)
 	}
@@ -131,10 +147,10 @@ Rules:
 	resp = resp[startIdx : endIdx+1]
 
 	var raw struct {
-		Description   string                       `json:"description"`
-		Components    []state.ComponentSpec        `json:"components"`
-		Dependencies  []state.DepSpec              `json:"dependencies"`
-		Endpoints     []state.EndpointSpec         `json:"endpoints"`
+		Description  string                `json:"description"`
+		Components   []state.ComponentSpec `json:"components"`
+		Dependencies []state.DepSpec       `json:"dependencies"`
+		Endpoints    []state.EndpointSpec  `json:"endpoints"`
 	}
 	if err := json.Unmarshal([]byte(resp), &raw); err != nil {
 		return nil, fmt.Errorf("parse LLM plan JSON: %w", err)
@@ -360,9 +376,9 @@ func (u *Architect) generatePlanFromTemplate(intent string) *state.ArchitectureP
 			Dependencies: []state.DepSpec{
 				{Name: "std", Version: "go1.21", Type: "stdlib"},
 			},
-			Endpoints:    []state.EndpointSpec{},
-			Confidence:   state.ConfidenceMedium,
-			Provenance:   state.NewProvenance(u.ID()),
+			Endpoints:     []state.EndpointSpec{},
+			Confidence:    state.ConfidenceMedium,
+			Provenance:    state.NewProvenance(u.ID()),
 			AlternativeID: "plan-template-cli",
 		}
 	} else {
@@ -375,9 +391,9 @@ func (u *Architect) generatePlanFromTemplate(intent string) *state.ArchitectureP
 			Dependencies: []state.DepSpec{
 				{Name: "std", Version: "go1.21", Type: "stdlib"},
 			},
-			Endpoints:    []state.EndpointSpec{},
-			Confidence:   state.ConfidenceMedium,
-			Provenance:   state.NewProvenance(u.ID()),
+			Endpoints:     []state.EndpointSpec{},
+			Confidence:    state.ConfidenceMedium,
+			Provenance:    state.NewProvenance(u.ID()),
 			AlternativeID: "plan-template-generic",
 		}
 	}

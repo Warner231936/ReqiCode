@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/kilo/spiral-codemaker/core/regression"
 	"github.com/kilo/spiral-codemaker/core/state"
 	"github.com/kilo/spiral-codemaker/core/system"
+	"github.com/kilo/spiral-codemaker/core/units"
 	"github.com/kilo/spiral-codemaker/execution/tests"
 	"github.com/kilo/spiral-codemaker/models/registry"
 	"github.com/kilo/spiral-codemaker/models/routing"
@@ -279,6 +281,52 @@ func cmdCanary(args []string) {
 	fmt.Println("\nNOTE: promotion is authorised, not applied. Applying the edit is a separate, explicit step.")
 }
 
+// printLLMUsage reports whether the language model actually did the work.
+//
+// Printed unconditionally rather than under a debug flag. The failure this
+// exists to catch is silent: a run where every artefact came from templates while
+// a capable model sat configured and unused looks identical to a run where the
+// model did the work.
+func printLLMUsage(u units.UsageReport) {
+	fmt.Println("\nLLM usage:")
+	switch {
+	case u.CircuitOpen:
+		fmt.Printf("  CIRCUIT OPEN: repeated failures short-circuited the provider; the rest of the run used templates\n")
+		for _, e := range u.Errors {
+			fmt.Printf("    %s\n", e)
+		}
+	case u.NeverCalled:
+		fmt.Println("  no calls attempted - the pipeline ran entirely on templates")
+		fmt.Println("  (expected only when no model is configured)")
+	case u.Degraded:
+		fmt.Printf("  DEGRADED: %d calls, %d succeeded, %d failed - falling back to templates for failed units\n",
+			u.Calls, u.Successes, u.Failures)
+		for _, e := range u.Errors {
+			fmt.Printf("    %s\n", e)
+		}
+	default:
+		fmt.Printf("  %d calls, all successful\n", u.Calls)
+	}
+	if len(u.ByCapability) > 0 {
+		caps := make([]string, 0, len(u.ByCapability))
+		for c := range u.ByCapability {
+			caps = append(caps, c)
+		}
+		sort.Strings(caps)
+		parts := make([]string, 0, len(caps))
+		for _, c := range caps {
+			parts = append(parts, fmt.Sprintf("%s=%d", c, u.ByCapability[c]))
+		}
+		fmt.Printf("  by capability: %s\n", strings.Join(parts, " "))
+	}
+	if len(u.Models) > 0 {
+		fmt.Printf("  models: %s\n", strings.Join(u.Models, ", "))
+	}
+	if u.CompletionTokens > 0 {
+		fmt.Printf("  completion tokens: %d\n", u.CompletionTokens)
+	}
+}
+
 func printUsage() {
 	fmt.Println("Spiral CodeMaker - Self-modifying, spiral-iterating AI coding system")
 	fmt.Println()
@@ -493,6 +541,8 @@ func runOrchestrator(orch *system.Orchestrator, startTime time.Time, outputPath 
 
 	fmt.Println()
 	fmt.Println(report)
+
+	printLLMUsage(orch.LLMUsage())
 
 	fmt.Printf("\nGenerated files location: %s\n", orch.WorkspacePath())
 	fmt.Printf("Total time: %s\n", elapsed)

@@ -27,34 +27,34 @@ import (
 )
 
 type Orchestrator struct {
-	ctx         context.Context
-	semiState   *state.SemiState
-	bus         *events.EventBus
-	attention   *attention.Manager
-	workspace   *workspace.Workspace
-	sandbox     *sandbox.Sandbox
-	router      *routing.Router
-	spiralMgr   *spiral.Manager
-	registry    *units.Registry
-	scheduler   *scheduler.Scheduler
-	memory      *persistence.PersistentMemory
-	proposer    *proposals.Proposer
-	config      *units.Config
+	ctx       context.Context
+	semiState *state.SemiState
+	bus       *events.EventBus
+	attention *attention.Manager
+	workspace *workspace.Workspace
+	sandbox   *sandbox.Sandbox
+	router    *routing.Router
+	spiralMgr *spiral.Manager
+	registry  *units.Registry
+	scheduler *scheduler.Scheduler
+	memory    *persistence.PersistentMemory
+	proposer  *proposals.Proposer
+	config    *units.Config
 
-	modelReg    *registry.ModelRegistry
+	modelReg *registry.ModelRegistry
 
-	requirementsAnalyst  *units.RequirementsAnalyst
-	decomposer           *units.Decomposer
-	architect            *units.Architect
-	codeGenerator        *units.CodeGenerator
-	testDesigner         *units.TestDesigner
-	testRunner           *units.TestRunnerUnit
-	debugger             *units.Debugger
-	critic               *units.Critic
-	consistencyChecker   *units.ConsistencyChecker
-	securityAnalyst      *units.SecurityAnalyst
-	documentationWriter  *units.DocumentationWriter
-	synthesizer          *units.Synthesizer
+	requirementsAnalyst *units.RequirementsAnalyst
+	decomposer          *units.Decomposer
+	architect           *units.Architect
+	codeGenerator       *units.CodeGenerator
+	testDesigner        *units.TestDesigner
+	testRunner          *units.TestRunnerUnit
+	debugger            *units.Debugger
+	critic              *units.Critic
+	consistencyChecker  *units.ConsistencyChecker
+	securityAnalyst     *units.SecurityAnalyst
+	documentationWriter *units.DocumentationWriter
+	synthesizer         *units.Synthesizer
 
 	workspacePath string
 
@@ -66,6 +66,9 @@ type Orchestrator struct {
 	ledger            *causal.Ledger
 	frontier          *converge.ParetoFrontier
 	pendingAssessment converge.Assessment
+	// runtime is retained so LLM usage can be reported after the run.
+
+	runtime *units.Runtime
 	// semiStateRaceEnabled records whether the race detector was actually
 	// engaged, so a run analysed without it is not mistaken for one analysed
 	// with it.
@@ -122,6 +125,7 @@ func NewOrchestratorWithRegistry(projectRoot, outputPath, intent string, maxIter
 		ctx:           ctx,
 		semiState:     ss,
 		bus:           bus,
+		runtime:       rt,
 		attention:     am,
 		workspace:     ws,
 		sandbox:       sb,
@@ -244,9 +248,9 @@ func (o *Orchestrator) Run() error {
 		// the one revision a mutator could edit for free.
 		if _, err := o.semiState.AppendChained(string(assessment.Phase) + ": " + assessment.Reason); err != nil {
 			o.semiState.AddEvidence(state.Evidence{
-				Type:      state.EvidenceObservation,
-				Content:   "chain append failed: " + err.Error(),
-				Strength:  state.ConfidenceHigh,
+				Type:       state.EvidenceObservation,
+				Content:    "chain append failed: " + err.Error(),
+				Strength:   state.ConfidenceHigh,
 				Provenance: state.NewProvenance("state-chain"),
 			})
 		}
@@ -282,9 +286,9 @@ func (o *Orchestrator) runRegressionGate() {
 	}
 	if _, isLLM := o.llmInUse(); isLLM {
 		o.semiState.AddEvidence(state.Evidence{
-			Type:     state.EvidenceObservation,
-			Content:  "regression gate skipped: LLM output is not token-reproducible, pinning it would gate on noise",
-			Strength: state.ConfidenceLow,
+			Type:       state.EvidenceObservation,
+			Content:    "regression gate skipped: LLM output is not token-reproducible, pinning it would gate on noise",
+			Strength:   state.ConfidenceLow,
 			Provenance: state.NewProvenance("regression-gate"),
 		})
 		return
@@ -293,18 +297,18 @@ func (o *Orchestrator) runRegressionGate() {
 	verdict := gate.Check(proj)
 	if verdict.Pass {
 		o.semiState.AddEvidence(state.Evidence{
-			Type:      state.EvidenceObservation,
-			Content:   "regression gate: " + verdict.Summary,
-			Strength:  state.ConfidenceHigh,
+			Type:       state.EvidenceObservation,
+			Content:    "regression gate: " + verdict.Summary,
+			Strength:   state.ConfidenceHigh,
 			Provenance: state.NewProvenance("regression-gate"),
 		})
 		return
 	}
 
 	o.semiState.AddEvidence(state.Evidence{
-		Type:     state.EvidenceAnalysis,
-		Content:  "regression gate FAILED:\n" + regression.FormatVerdicts([]regression.Verdict{verdict}),
-		Strength: state.ConfidenceCertain,
+		Type:       state.EvidenceAnalysis,
+		Content:    "regression gate FAILED:\n" + regression.FormatVerdicts([]regression.Verdict{verdict}),
+		Strength:   state.ConfidenceCertain,
 		Provenance: state.NewProvenance("regression-gate"),
 	})
 	o.attention.Boost("critic", "regression detected, review required", 0.8)
@@ -340,15 +344,15 @@ func (o *Orchestrator) llmInUse() (any, bool) {
 // observeAndAssess runs the Phase 0 measurement pass for the current revision.
 func (o *Orchestrator) observeAndAssess() converge.Assessment {
 	pot := o.convergence.Observe(o.semiState)
-	o.ledger.ObserveBaseline(o.semiState)
 
-	// Attribute credit to everything proposed since the last pass.
+	// Attribute credit to everything proposed since the baseline captured at the
+	// top of this iteration.
 	attr := o.ledger.Attribute(o.semiState)
 	if len(attr.Attributed) > 0 {
 		o.semiState.AddEvidence(state.Evidence{
-			Type:     state.EvidenceAnalysis,
-			Content:  "causal attribution: " + attr.Explanation,
-			Strength: state.ConfidenceMedium,
+			Type:       state.EvidenceAnalysis,
+			Content:    "causal attribution: " + attr.Explanation,
+			Strength:   state.ConfidenceMedium,
 			Provenance: state.NewProvenance("causal-ledger"),
 		})
 	}
@@ -405,12 +409,12 @@ func (o *Orchestrator) finalizeInstrumentation() {
 		// Test results are included so the exact command that produced each
 		// outcome is auditable. Attribution claims are only meaningful if the
 		// ground-truth measurement is inspectable.
-		"test_results":   o.semiState.GetTestResults(),
-		"race_enabled":   o.semiStateRaceEnabled,
+		"test_results": o.semiState.GetTestResults(),
+		"race_enabled": o.semiStateRaceEnabled,
 		// The chain is the audit record. It is written out so the hash history
 		// survives the process and can be verified later.
-		"chain":          o.semiState.Chain(),
-		"chain_verify":   o.semiState.VerifyChain(),
+		"chain":        o.semiState.Chain(),
+		"chain_verify": o.semiState.VerifyChain(),
 	}
 
 	data, err := json.MarshalIndent(report, "", "  ")
@@ -436,6 +440,12 @@ func (o *Orchestrator) runIteration() error {
 	record := o.spiralMgr.StartIteration()
 	_ = record
 
+	// Capture the objective vector BEFORE any unit runs. Attribution needs a
+	// before-picture taken prior to the changes being judged; capturing it in the
+	// same function that reads the after-picture guarantees a zero delta and
+	// means the ledger records no credit for anything, ever.
+	o.ledger.ObserveBaseline(o.semiState)
+
 	o.spiralMgr.UpdatePhase(spiral.PhaseRequirement)
 	o.runUnitSafe(ctx, o.requirementsAnalyst)
 
@@ -455,9 +465,9 @@ func (o *Orchestrator) runIteration() error {
 	br := o.sandbox.BuildRunner().Build(ctx)
 	if !br.Success {
 		o.semiState.AddEvidence(state.Evidence{
-			Type:     state.EvidenceAnalysis,
-			Content:  "build failed: " + br.Error,
-			Strength: state.ConfidenceHigh,
+			Type:       state.EvidenceAnalysis,
+			Content:    "build failed: " + br.Error,
+			Strength:   state.ConfidenceHigh,
 			Provenance: state.NewProvenance("orchestrator"),
 		})
 		o.spiralMgr.AddEvidence(state.Evidence{
@@ -518,16 +528,16 @@ func (o *Orchestrator) runUnitSafe(ctx context.Context, u units.Unit) {
 
 	if err != nil {
 		o.semiState.AddEvidence(state.Evidence{
-			Type:     state.EvidenceObservation,
-			Content:  fmt.Sprintf("unit %s completed with error: %s (took %s)", u.ID(), err.Error(), elapsed),
-			Strength: state.ConfidenceMedium,
+			Type:       state.EvidenceObservation,
+			Content:    fmt.Sprintf("unit %s completed with error: %s (took %s)", u.ID(), err.Error(), elapsed),
+			Strength:   state.ConfidenceMedium,
 			Provenance: state.NewProvenance(u.ID()),
 		})
 	} else {
 		o.semiState.AddEvidence(state.Evidence{
-			Type:     state.EvidenceObservation,
-			Content:  fmt.Sprintf("unit %s completed successfully (took %s)", u.ID(), elapsed),
-			Strength: state.ConfidenceLow,
+			Type:       state.EvidenceObservation,
+			Content:    fmt.Sprintf("unit %s completed successfully (took %s)", u.ID(), elapsed),
+			Strength:   state.ConfidenceLow,
 			Provenance: state.NewProvenance(u.ID()),
 		})
 	}
@@ -564,6 +574,17 @@ func (o *Orchestrator) SemiState() *state.SemiState {
 // trajectory and the convergence verdict after a run.
 func (o *Orchestrator) Convergence() *converge.Tracker {
 	return o.convergence
+}
+
+// LLMUsage reports whether the language model was actually consulted during the
+// run, and at what cost.
+//
+// This exists because "the LLM is wired up" and "the LLM was used" are different
+// claims, and only the second one matters. A pipeline can have a capable model
+// configured and still produce every artefact from templates, silently. This
+// accessor makes that distinction observable rather than assumed.
+func (o *Orchestrator) LLMUsage() units.UsageReport {
+	return o.runtime.LLM.Report()
 }
 
 // CausalLedger exposes the intervention record and credit assignment.

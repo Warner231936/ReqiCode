@@ -32,6 +32,14 @@ type Runtime struct {
 	Ledger *causal.Ledger
 }
 
+// LastLLMCall reports the completion cost of the most recent successful LLM call.
+func (r *Runtime) LastLLMCall() int {
+	if r.LLM == nil {
+		return 0
+	}
+	return r.LLM.LastLLMCall()
+}
+
 type Config struct {
 	ProjectRoot   string
 	OutputPath    string

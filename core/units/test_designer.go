@@ -32,9 +32,9 @@ func (u *TestDesigner) Run(ctx context.Context, semiState *state.SemiState, bus 
 
 	if semiState.HasTestFiles() {
 		semiState.AddEvidence(state.Evidence{
-			Type:     state.EvidenceObservation,
-			Content:  "tests already exist, skipping design",
-			Strength: state.ConfidenceLow,
+			Type:       state.EvidenceObservation,
+			Content:    "tests already exist, skipping design",
+			Strength:   state.ConfidenceLow,
 			Provenance: state.NewProvenance(u.ID()),
 		})
 		return nil, nil
@@ -45,9 +45,9 @@ func (u *TestDesigner) Run(ctx context.Context, semiState *state.SemiState, bus 
 	// Use template-based test generation based on architecture plan
 	testFiles = generateTestFilesForPlan(plan)
 	semiState.AddEvidence(state.Evidence{
-		Type:     state.EvidenceObservation,
-		Content:  fmt.Sprintf("Using template-based test generation for %d files", len(testFiles)),
-		Strength: state.ConfidenceHigh,
+		Type:       state.EvidenceObservation,
+		Content:    fmt.Sprintf("Using template-based test generation for %d files", len(testFiles)),
+		Strength:   state.ConfidenceHigh,
 		Provenance: state.NewProvenance(u.ID()),
 	})
 
@@ -63,10 +63,10 @@ func (u *TestDesigner) Run(ctx context.Context, semiState *state.SemiState, bus 
 			state.OpCreate,
 			f.Path,
 			f.Content,
-			"test for " + f.Description,
+			"test for "+f.Description,
 			u.ID(),
 			state.ConfidenceHigh,
-			"verify " + f.Description,
+			"verify "+f.Description,
 			nil,
 		)
 
@@ -96,9 +96,9 @@ func (u *TestDesigner) Run(ctx context.Context, semiState *state.SemiState, bus 
 	}
 
 	semiState.AddEvidence(state.Evidence{
-		Type:     state.EvidenceObservation,
-		Content:  fmt.Sprintf("designed %d test files", len(testFiles)),
-		Strength: state.ConfidenceHigh,
+		Type:       state.EvidenceObservation,
+		Content:    fmt.Sprintf("designed %d test files", len(testFiles)),
+		Strength:   state.ConfidenceHigh,
 		Provenance: state.NewProvenance(u.ID()),
 	})
 

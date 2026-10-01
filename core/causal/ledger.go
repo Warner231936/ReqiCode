@@ -443,6 +443,17 @@ type StrategyScore struct {
 	Samples    int     `json:"samples"`
 }
 
+// RecordModelCall logs an LLM invocation as an intervention.
+//
+// Model calls are interventions in exactly the sense the ledger cares about:
+// something acted on the workspace, at a cost, with a predicted effect. Leaving
+// them out would bias every strategy comparison toward whichever strategy happens
+// to be logged, and the model would do work that never appears in the causal
+// record at all.
+func (l *Ledger) RecordModelCall(p state.CodeProposal, strategy string, tokens int) *Intervention {
+	return l.Record(p, strategy, tokens)
+}
+
 // CreditFor returns the net credit assigned to a proposal ID.
 func (l *Ledger) CreditFor(proposalID string) (float64, bool) {
 	l.mu.RLock()
