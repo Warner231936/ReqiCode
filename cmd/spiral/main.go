@@ -13,6 +13,7 @@ import (
 	"github.com/kilo/spiral-codemaker/api"
 	"github.com/kilo/spiral-codemaker/core/canary"
 	"github.com/kilo/spiral-codemaker/core/regression"
+	"github.com/kilo/spiral-codemaker/core/selfmodify"
 	"github.com/kilo/spiral-codemaker/core/state"
 	"github.com/kilo/spiral-codemaker/core/system"
 	"github.com/kilo/spiral-codemaker/core/units"
@@ -37,6 +38,8 @@ func main() {
 		cmdBaseline(args)
 	case "canary":
 		cmdCanary(args)
+	case "improve":
+		cmdImprove(args)
 	case "dashboard":
 		cmdDashboard(args)
 	case "daemon":
@@ -325,6 +328,195 @@ func printLLMUsage(u units.UsageReport) {
 	if u.CompletionTokens > 0 {
 		fmt.Printf("  completion tokens: %d\n", u.CompletionTokens)
 	}
+}
+
+// cmdImprove trials a change to the system's own source and promotes it only on
+// a measured improvement.
+//
+// The target tree is copied, the edit applied to the copy, and the copy's tests
+// and coverage measured against a baseline captured from an identical fresh copy.
+// Nothing is written to the live tree unless the trial wins, and winning is
+// defined numerically rather than by a model's opinion.
+func cmdImprove(args []string) {
+	fs := flag.NewFlagSet("improve", flag.ExitOnError)
+	pkg := fs.String("pkg", "", "package to improve, e.g. ./core/state (required)")
+	root := fs.String("root", ".", "repository root")
+	apply := fs.Bool("apply", false, "copy the winning tree over the live source")
+	keep := fs.Bool("keep", false, "retain trial directories")
+	modelPath := fs.String("model", "", "GGUF model for the proposal (optional; dry run without it)")
+	limit := fs.Int("limit", 1, "how many functions to request tests for")
+	attempts := fs.Int("attempts", 3, "generation attempts per function before giving up")
+	scratch := fs.String("scratch", "", "scratch parent directory")
+	fs.Parse(args)
+
+	if *pkg == "" {
+		fmt.Println("Error: --pkg is required, e.g. --pkg ./core/state")
+		os.Exit(1)
+	}
+
+	h := selfmodify.NewHarness(*root, selfmodify.NewGoRunner())
+	if *scratch != "" {
+		h.ScratchParent = *scratch
+	}
+
+	ctx := context.Background()
+
+	fmt.Printf("Measuring baseline for %s ...\n", *pkg)
+	baseRes, err := h.Baseline(ctx, *pkg)
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		os.Exit(1)
+	}
+	baseDir, base := baseRes.Dir, baseRes.Measurement
+	if !*keep {
+		defer h.Cleanup(baseDir)
+	}
+	fmt.Printf("  baseline : %s\n\n", selfmodify.FormatCounts(base))
+
+	if !base.BuildOK {
+		fmt.Printf("Refusing to improve a package that does not build: %s\n", base.Err)
+		os.Exit(1)
+	}
+
+	// Build the work list from exported functions the baseline has not covered.
+	work, err := h.WorkList(baseDir, *pkg, baseRes.ProfilePath)
+	if err != nil {
+		fmt.Printf("Error building work list: %v\n", err)
+		os.Exit(1)
+	}
+	if len(work) == 0 {
+		fmt.Printf("No uncovered exported functions in %s; nothing measurable to improve.\n", *pkg)
+		return
+	}
+	if len(work) > *limit {
+		work = work[:*limit]
+	}
+
+	sourceFiles, _ := h.SourceFiles(baseDir, *pkg)
+
+	fmt.Printf("Work list (%d function(s), baseline coverage %.1f%%):\n", len(work), base.CoveragePercent)
+	for _, w := range work {
+		fmt.Printf("  %s:%d  %s\n", w.File, w.Line, w.Name)
+	}
+	fmt.Println()
+
+	// The proposal writes test files into the package's own directory, so surface
+	// exactly where they will land before spending a model round-trip.
+	fmt.Printf("Proposed test files would be written to: %s/*_test.go\n\n",
+		filepath.ToSlash(selfmodify.PackageDirRel(*pkg)))
+
+	if *modelPath == "" {
+		fmt.Println("No --model given, so no proposal was generated.")
+		fmt.Println("The measurement path is live: pass --model <gguf> to have the model")
+		fmt.Println("propose tests for the work list above.")
+		return
+	}
+
+	if *modelPath == "" {
+		fmt.Println("No --model given, so no proposal was generated.")
+		fmt.Println("The measurement path is live: pass --model <gguf> to have the model")
+		fmt.Println("propose tests for the work list above.")
+		return
+	}
+
+	// Propose, trial, and retry on failure -- as one loop.
+	//
+	// Retrying only generation-time rejections is half the mechanism. The
+	// interesting failures are the ones only a compiler and a real test run can
+	// find: an unused import, a hallucinated helper, a wrong expected value. A
+	// model makes a *different* mistake each attempt, and each one is cheap to
+	// discover and cheap to retry, so the error is fed back and the next attempt
+	// starts from knowledge rather than from scratch.
+	//
+	// This is where an unreliable generator becomes a reliable one. It only works
+	// because the verification is genuine: with an advisory gate, retrying would
+	// only promote a lucky wrong answer more often.
+	var verdict selfmodify.Verdict
+	var cand selfmodify.Measurement
+	var lastErr error
+
+	for attempt := 1; attempt <= *attempts; attempt++ {
+		proposal, perr := selfmodify.ProposeTests(ctx, *modelPath, *root, *pkg, work, sourceFiles, 1, lastErr)
+		if perr != nil {
+			lastErr = perr
+			fmt.Printf("attempt %d/%d: %v\n", attempt, *attempts, perr)
+			continue
+		}
+
+		candDir, measured, _ := h.Candidate(ctx, *pkg, func(d string) error {
+			return proposal.Write(d)
+		})
+		if !*keep {
+			defer h.Cleanup(candDir)
+		}
+		cand = measured
+		verdict = selfmodify.Compare(base, cand)
+
+		fmt.Printf("attempt %d/%d: candidate %s -> %s\n",
+			attempt, *attempts, selfmodify.FormatCounts(cand), shortVerdict(verdict))
+
+		if verdict.Promote {
+			fmt.Printf("  proposal: %s (needed %d generation attempt(s), %d tokens)\n",
+				strings.Join(proposal.Paths, ", "), proposal.Trials, proposal.Tokens)
+			break
+		}
+
+		lastErr = fmt.Errorf("%s", verdict.Reason)
+		if cand.Err != "" {
+			lastErr = fmt.Errorf("%s; compiler said: %s", verdict.Reason, firstLine(cand.Err))
+		}
+	}
+
+	if verdict.Promote {
+		fmt.Print(selfmodify.FormatVerdict(verdict))
+
+		reportDir := filepath.Join("instrumentation", "selfmod")
+		_ = selfmodify.Write(reportDir, selfmodify.Report{
+			Objective: selfmodify.ObjectiveCoverage,
+			Target:    *pkg,
+			Baseline:  base,
+			Candidate: cand,
+			Verdict:   verdict,
+			Timestamp: time.Now().Format(time.RFC3339),
+		})
+
+		if !*apply {
+			fmt.Printf("\nPromoted in the trial tree only. Re-run with --apply to write it to %s.\n", *root)
+			return
+		}
+
+		proposal, _ := selfmodify.ProposeTests(ctx, *modelPath, *root, *pkg, work, sourceFiles, 1, lastErr)
+		applied, aerr := proposal.ApplyTo(*root)
+		if aerr != nil {
+			fmt.Printf("Error applying to live source: %v\n", aerr)
+			os.Exit(1)
+		}
+		fmt.Printf("\nApplied to %s: %s\n", *root, applied)
+		return
+	}
+
+	fmt.Printf("\ncannot promote after %d attempt(s): %s\n", *attempts, verdict.Reason)
+	fmt.Println("The live source is unchanged.")
+	os.Exit(1)
+}
+
+// shortVerdict condenses a verdict to its headline for progress output.
+func shortVerdict(v selfmodify.Verdict) string {
+	if v.Promote {
+		return "PROMOTE"
+	}
+	return v.Reason
+}
+
+func firstLine(s string) string {
+	s = strings.TrimSpace(s)
+	if idx := strings.Index(s, "\n"); idx >= 0 {
+		return s[:idx]
+	}
+	if len(s) > 160 {
+		return s[:160] + "..."
+	}
+	return s
 }
 
 func printUsage() {
