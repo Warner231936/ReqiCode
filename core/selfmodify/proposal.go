@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kilo/spiral-codemaker/core/apiscan"
 	"github.com/kilo/spiral-codemaker/models/provider"
 	"github.com/kilo/spiral-codemaker/models/registry"
 	"github.com/kilo/spiral-codemaker/models/routing"
@@ -39,6 +40,10 @@ type Proposal struct {
 const (
 	selfmodTimeout = 150 * time.Second
 	selfmodTokens  = 1200
+	// apiBudget bounds the API listing in the prompt. Sized to hold a typical
+	// package's exported surface whole; the alternative -- truncating signatures
+	// mid-declaration -- reintroduces exactly the hallucination this prevents.
+	apiBudget = 3000
 )
 
 // readFunctionSource returns just the target function, with its imports.
@@ -209,11 +214,32 @@ func ProposeTests(ctx context.Context, modelPath, root, pkg string, work []Uncov
 		}
 
 		rel := filepath.ToSlash(filepath.Join(PackageDirRel(pkg), toSnake(fn.Name)+"_test.go"))
+
+		// The package API, extracted from the AST.
+		//
+		// This replaces guessing as the source of API knowledge. Across five
+		// attempts a 14B coder model failed with `undefined: Project` because the
+		// prompt contained a function body and nothing demonstrating how the
+		// surrounding package is actually used. Feeding it signatures parsed out of
+		// the source is not a prompt tweak: it is the compiler's own view of the
+		// API, arrived at without any inference, so it cannot be confidently wrong
+		// the way a generated API summary can.
+		apiRef := ""
+		if api, aerr := apiscan.Scan(pkgDir); aerr == nil {
+			apiRef = api.Summary(apiBudget)
+		} else {
+			// Say so rather than silently falling back, so a degraded run is
+			// distinguishable from one where the model simply failed.
+			apiRef = "(API extraction failed: " + aerr.Error() + ")"
+		}
+
+		// Existing tests still add value: they show idioms and construction
+		// patterns that a signature list cannot.
 		example := existingTestExcerpt(pkgDir)
 
 		var lastErr error = prevErr
 		for attempt := 1; attempt <= attempts; attempt++ {
-			body, tokens, perr := proposeOne(ctx, p, modelName, testPkg, fn, source, example, attempt, lastErr)
+			body, tokens, perr := proposeOne(ctx, p, modelName, testPkg, fn, source, example, apiRef, attempt, lastErr)
 			prop.Tokens += tokens
 			if perr != nil {
 				lastErr = perr
@@ -250,7 +276,7 @@ func ProposeTests(ctx context.Context, modelPath, root, pkg string, work []Uncov
 // through. Its job is to catch the cheap, frequent mistakes before spending a
 // full trial on them.
 func proposeOne(ctx context.Context, p provider.ModelProvider, modelName, testPkg string,
-	fn UncoveredFunc, source, example string, attempt int, prevErr error) (string, int, error) {
+	fn UncoveredFunc, source, example, apiRef string, attempt int, prevErr error) (string, int, error) {
 
 	// State the rule that a model reliably gets wrong, and state it every time
 	// rather than only on retry. The test file lives *inside* the package, so
@@ -269,8 +295,15 @@ Function to test: %s
 
 Function source:
 %s
+
+THE COMPLETE EXPORTED API OF THIS PACKAGE, extracted from its source:
 %s
-Here is how existing tests in this same package use the API -- follow these exact types and idioms:
+
+This API listing is exact. Every identifier you use must appear in it. Do not
+invent a name, a field, or a signature that is not listed above.
+
+%s
+Here is how existing tests in this same package use the API:
 
 %s
 
@@ -280,15 +313,17 @@ Rules:
 - You are writing INSIDE this package. Do NOT import %q or any path
   ending in %q -- an internal test file must never import its own package,
   because that is an import cycle. Use the identifiers directly.
-- Use ONLY types and helpers that appear above. Do not invent any.
+- If you would rather use package %s_test, then you MUST import the package and
+  qualify every package-level name (write %s.Foo, not Foo).
+- Use ONLY types and helpers listed above. Do not invent any.
 - Import every OTHER package you reference.
 - Write 1-2 test functions. Keep the whole file under 40 lines.
 - You MUST call %s and assert on its result.
 
 %s
 
-Write the test now.`, testPkg, fn.Name, truncate(source, 2000), exampleNote(example), example,
-		testPkg, testPkg, testPkg, fn.Name, variation)
+Write the test now.`, testPkg, fn.Name, truncate(source, 2000), apiRef, exampleNote(example), example,
+		testPkg, testPkg, testPkg, testPkg+"_test", testPkg, fn.Name, variation)
 
 	callCtx, cancel := context.WithTimeout(ctx, selfmodTimeout)
 	defer cancel()

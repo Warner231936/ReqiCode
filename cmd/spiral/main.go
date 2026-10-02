@@ -18,6 +18,7 @@ import (
 	"github.com/kilo/spiral-codemaker/core/state"
 	"github.com/kilo/spiral-codemaker/core/system"
 	"github.com/kilo/spiral-codemaker/core/units"
+	"github.com/kilo/spiral-codemaker/core/verify"
 	"github.com/kilo/spiral-codemaker/execution/tests"
 	"github.com/kilo/spiral-codemaker/models/registry"
 	"github.com/kilo/spiral-codemaker/models/routing"
@@ -344,11 +345,14 @@ func cmdImprove(args []string) {
 	root := fs.String("root", ".", "repository root")
 	apply := fs.Bool("apply", false, "copy the winning tree over the live source")
 	keep := fs.Bool("keep", false, "retain trial directories")
+	mechanical := fs.Bool("mechanical", false, "synthesise tests from the type system; no model involved")
 	modelPath := fs.String("model", "", "GGUF model for the proposal (optional; dry run without it)")
 	limit := fs.Int("limit", 1, "how many functions to request tests for")
 	attempts := fs.Int("attempts", 3, "generation attempts per function before giving up")
 	scratch := fs.String("scratch", "", "scratch parent directory")
 	fs.Parse(args)
+
+	applyPromotion = *apply
 
 	if *pkg == "" {
 		fmt.Println("Error: --pkg is required, e.g. --pkg ./core/state")
@@ -406,10 +410,16 @@ func cmdImprove(args []string) {
 	fmt.Printf("Proposed test files would be written to: %s/*_test.go\n\n",
 		filepath.ToSlash(selfmodify.PackageDirRel(*pkg)))
 
+	if *mechanical {
+		runMechanical(*root, *pkg, base, h, baseDir, ctx)
+		return
+	}
+
 	if *modelPath == "" {
 		fmt.Println("No --model given, so no proposal was generated.")
-		fmt.Println("The measurement path is live: pass --model <gguf> to have the model")
-		fmt.Println("propose tests for the work list above.")
+		fmt.Println("The measurement path is live. Either:")
+		fmt.Println("  pass --model <gguf>          to have the model propose tests, or")
+		fmt.Println("  pass --mechanical             to synthesise them from the type system")
 		return
 	}
 
@@ -557,6 +567,115 @@ func firstLine(s string) string {
 	}
 	return s
 }
+
+// runMechanical improves a package with no model involved at all.
+//
+// Tests are synthesised from the package's exported signatures by core/verify and
+// trialled through the same canary and comparison every model-written change goes
+// through. The gate is unchanged; only the proposer is different.
+//
+// This is the answer to a measured result rather than a design preference. The
+// model-driven path succeeded zero times out of twenty attempts spanning a 1.1B
+// model, a 7B model, and a 14B coder model at 426 tok/s with an exact API listing
+// in the prompt. Better models narrowed the failure mode without removing it,
+// which says the constraint is the requirement that a model be correct about
+// code -- not the size of the model.
+func runMechanical(root, pkg string, base selfmodify.Measurement, h *selfmodify.Harness, baseDir string, ctx context.Context) {
+	fmt.Println("Mechanical mode: synthesising tests from the type system, no model involved.")
+
+	result, err := verify.Synthesize(filepath.Join(root, filepath.FromSlash(selfmodify.PackageDirRel(pkg))),
+		selfmodify.PackageName(pkg))
+	if err != nil {
+		fmt.Printf("Error synthesising: %v\n", err)
+		os.Exit(1)
+	}
+	if len(result.Files) == 0 {
+		fmt.Println("Nothing synthesisable: the package exports no callable functions.")
+		for _, s := range result.Skipped {
+			fmt.Printf("  skipped %s: %s\n", s.Func, s.Reason)
+		}
+		return
+	}
+
+	// Write the synthesised files into a fresh trial tree and measure.
+	rel := selfmodify.PackageDirRel(pkg)
+	candDir, cand, cerr := h.Candidate(ctx, pkg, func(d string) error {
+		for _, f := range result.Files {
+			path := filepath.Join(d, filepath.FromSlash(rel), filepath.Base(f.Path))
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				return err
+			}
+			if err := os.WriteFile(path, []byte(f.Content), 0o644); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	defer h.Cleanup(candDir)
+	if cerr != nil && !cand.BuildOK {
+		fmt.Printf("Error applying: %v\n", cerr)
+		os.Exit(1)
+	}
+
+	fmt.Printf("  synthesised %d test(s) across %d file(s)\n", result.Files[0].Tests, len(result.Files))
+	for _, s := range result.Skipped {
+		fmt.Printf("  skipped %s: %s\n", s.Func, s.Reason)
+	}
+	fmt.Printf("  baseline : %s\n", selfmodify.FormatCounts(base))
+	fmt.Printf("  candidate: %s\n\n", selfmodify.FormatCounts(cand))
+
+	verdict := selfmodify.Compare(base, cand)
+	fmt.Print(selfmodify.FormatVerdict(verdict))
+
+	// Classify before treating a non-promotion as a failure. A smoke test that
+	// panics on a nil argument has found a nil-safety defect in existing code;
+	// that is the verifier's highest-value output, not a reason to discard it.
+	obs := selfmodify.Classify(base, cand, true)
+	findings := selfmodify.Findings(base, cand, obs, pkg)
+
+	if len(findings) > 0 {
+		fmt.Printf("\nDISCOVERY: %s\n", findings[0].Summary)
+		if findings[0].FailureOutput != "" {
+			fmt.Printf("%s\n", firstLine(findings[0].FailureOutput))
+		}
+		fmt.Println("\nThe generated tests are valid and the code is not. They are not promoted")
+		fmt.Println("because they fail, but they should be kept as a defect record.")
+	}
+
+	_ = selfmodify.Write(filepath.Join("instrumentation", "selfmod"), selfmodify.Report{
+		Objective: selfmodify.ObjectiveCoverage,
+		Target:    pkg,
+		Baseline:  base,
+		Candidate: cand,
+		Verdict:   verdict,
+		Timestamp: time.Now().Format(time.RFC3339),
+	})
+
+	if !verdict.Promote {
+		fmt.Println("\nNot promoted. The live source is unchanged.")
+		os.Exit(1)
+	}
+
+	if applyPromotion {
+		for _, f := range result.Files {
+			path := filepath.Join(root, filepath.FromSlash(rel), filepath.Base(f.Path))
+			if _, err := os.Stat(path); err == nil {
+				fmt.Printf("Refusing to overwrite existing file %s\n", filepath.Base(path))
+				os.Exit(1)
+			}
+			if err := os.WriteFile(path, []byte(f.Content), 0o644); err != nil {
+				fmt.Printf("Error writing %s: %v\n", path, err)
+				os.Exit(1)
+			}
+			fmt.Printf("Applied: %s\n", path)
+		}
+		return
+	}
+	fmt.Println("\nPromoted in the trial tree only. Re-run with --apply to write it.")
+}
+
+// applyPromotion mirrors the -apply flag for the mechanical path.
+var applyPromotion bool
 
 func printUsage() {
 	fmt.Println("Spiral CodeMaker - Self-modifying, spiral-iterating AI coding system")

@@ -72,11 +72,17 @@ var Weights = struct {
 // makes trajectories trustworthy, because it means a change in the potential
 // between two revisions is attributable to state change and nothing else.
 func ComputePotential(ss *state.SemiState) Potential {
-	p := Potential{Revision: ss.Revision}
-
+	// The nil guard must come before any dereference.
+	//
+	// It did not: the revision read below preceded the nil check, so the guard was
+	// dead code and ComputePotential panicked on a nil state. Found by
+	// core/verify, which synthesises a smoke test calling every exported function
+	// with zero arguments -- including nil, for a pointer parameter.
 	if ss == nil {
-		return p
+		return Potential{}
 	}
+
+	p := Potential{Revision: ss.Revision}
 
 	p.ConfidenceTerm = float64(ss.Confidence)
 	p.HasFiles = ss.HasGeneratedFiles()

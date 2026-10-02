@@ -92,15 +92,86 @@ type Verdict struct {
 // promoting it would train the system to churn.
 const CoverageThreshold = 0.5
 
+// Observation is a trial outcome. Discovery distinguishes "the change broke
+// something" from "the change found something", which are opposites.
+//
+// A mechanically-synthesised smoke test that panics on a nil argument has done
+// exactly its job: it found a nil-safety defect in existing code. Treating that
+// as a regression would discard the most valuable output the verifier can
+// produce, and would make the system refuse to publish its own findings.
+type Observation string
+
+const (
+	// ObservationImproved: measurably better, no new failures.
+	ObservationImproved Observation = "improved"
+	// ObservationRegression: existing behaviour broke.
+	ObservationRegression Observation = "regression"
+	// ObservationDiscovery: newly-added tests fail against existing code, which
+	// means they found something rather than caused something.
+	ObservationDiscovery Observation = "discovery"
+	// ObservationNeutral: no measurable change.
+	ObservationNeutral Observation = "neutral"
+	// ObservationBuildFailure: the change does not compile.
+	ObservationBuildFailure Observation = "build-failure"
+)
+
+// Classify derives the nature of a trial from the baseline and candidate
+// measurements.
+//
+// The distinction between regression and discovery turns on which side the
+// failures are on. Failures that were already there are the incumbent's. Failures
+// that appear only in the candidate came from the new tests, and when those tests
+// are mechanical smoke tests, a new failure is a defect in the code under test.
+//
+// `newTests` distinguishes a coverage-adding trial from an edit to existing files,
+// because only the former can legitimately produce discoveries: a modified
+// existing test that starts failing is a regression, full stop.
+func Classify(base, cand Measurement, newTests bool) Observation {
+	if !cand.BuildOK {
+		return ObservationBuildFailure
+	}
+	if cand.Failed > base.Failed {
+		if !newTests {
+			// An edit to existing tests that introduces failures is a regression
+			// regardless of intent.
+			return ObservationRegression
+		}
+		return ObservationDiscovery
+	}
+	if cand.Failed > 0 && base.Failed == 0 {
+		return ObservationRegression
+	}
+	if cand.CoveragePercent > base.CoveragePercent+CoverageThreshold {
+		return ObservationImproved
+	}
+	return ObservationNeutral
+}
+
+// Finding is a defect a synthesised test discovered in existing code.
+type Finding struct {
+	Target  string `json:"target"`
+	Summary string `json:"summary"`
+	// CoverageGained is still recorded: the new tests are worth keeping even
+	// though they fail, because a failing test that documents a real defect is
+	// the correct artifact.
+	CoverageGained float64 `json:"coverage_gained"`
+	// FailureOutput is the diagnostic, truncated. Without it a finding is an
+	// assertion the reader must take on faith.
+	FailureOutput string `json:"failure_output,omitempty"`
+}
+
 // ImprovementThreshold is the minimum score delta in objective units.
 const ImprovementThreshold = CoverageThreshold
 
 // Compare decides promotion.
 //
 // A candidate that fails to build is rejected outright, regardless of score: a
-// tree that does not compile is not a better tree under any measurement, and
-// permitting a high score to outvote a build failure would reintroduce exactly
-// the failure mode the canary exists to prevent.
+// tree that does not compile is not a better tree under any measurement.
+//
+// A candidate that introduces failures is also rejected, but Classify is what
+// distinguishes a regression from a discovery, and a discovery is not a reason to
+// discard the change -- it is a result. Callers should Classify before treating a
+// non-promotion as failure.
 func Compare(baseline, candidate Measurement) Verdict {
 	v := Verdict{Baseline: baseline, Candidate: candidate}
 	v.Delta = candidate.Score() - baseline.Score()
@@ -133,6 +204,27 @@ func Compare(baseline, candidate Measurement) Verdict {
 	v.Reason = fmt.Sprintf("promote: coverage %+.2f (%d failing -> %d failing)",
 		v.Delta, baseline.Failed, candidate.Failed)
 	return v
+}
+
+// Findings extracts defects that new tests discovered in existing code.
+//
+// Returns nil when the trial was a clean regression or improvement. The failures
+// are kept verbatim because a reader who cannot see the panic cannot judge the
+// finding.
+func Findings(base, cand Measurement, obs Observation, target string) []Finding {
+	if obs != ObservationDiscovery {
+		return nil
+	}
+	summary := fmt.Sprintf("%d new failing test(s) appeared after adding coverage to %s; "+
+		"the tests compile, so they are reporting defects in existing code",
+		cand.Failed, target)
+
+	return []Finding{{
+		Target:         target,
+		Summary:        summary,
+		CoverageGained: cand.CoveragePercent - base.CoveragePercent,
+		FailureOutput:  cand.Err,
+	}}
 }
 
 // ---------------------------------------------------------------------------
