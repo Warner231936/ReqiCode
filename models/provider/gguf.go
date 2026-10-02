@@ -10,15 +10,15 @@ import (
 )
 
 type GGUFProviderConfig struct {
-	ServerURL      string `json:"server_url,omitempty"`
-	ModelPath      string `json:"model_path,omitempty"`
-	NGPULayers     int    `json:"n_gpu_layers,omitempty"`
-	MainGPU        int    `json:"main_gpu,omitempty"`
-	TensorSplit    string `json:"tensor_split,omitempty"`
-	UseCUDA        bool   `json:"use_cuda,omitempty"`
-	UseMetal       bool   `json:"use_metal,omitempty"`
-	UseVulkan      bool   `json:"use_vulkan,omitempty"`
-	CacheDir       string `json:"cache_dir,omitempty"`
+	ServerURL   string `json:"server_url,omitempty"`
+	ModelPath   string `json:"model_path,omitempty"`
+	NGPULayers  int    `json:"n_gpu_layers,omitempty"`
+	MainGPU     int    `json:"main_gpu,omitempty"`
+	TensorSplit string `json:"tensor_split,omitempty"`
+	UseCUDA     bool   `json:"use_cuda,omitempty"`
+	UseMetal    bool   `json:"use_metal,omitempty"`
+	UseVulkan   bool   `json:"use_vulkan,omitempty"`
+	CacheDir    string `json:"cache_dir,omitempty"`
 }
 
 type GGUFProvider struct {
@@ -27,10 +27,10 @@ type GGUFProvider struct {
 }
 
 type ggufLoadRequest struct {
-	Model        string `json:"model"`
-	NGPULayers    int    `json:"n_gpu_layers,omitempty"`
-	MainGPU       int    `json:"main_gpu,omitempty"`
-	TensorSplit   string `json:"tensor_split,omitempty"`
+	Model       string `json:"model"`
+	NGPULayers  int    `json:"n_gpu_layers,omitempty"`
+	MainGPU     int    `json:"main_gpu,omitempty"`
+	TensorSplit string `json:"tensor_split,omitempty"`
 }
 
 type ggufLoadResponse struct {
@@ -39,24 +39,24 @@ type ggufLoadResponse struct {
 }
 
 type ggufCompletionRequest struct {
-	Model            string   `json:"model"`
-	Messages         []Message `json:"messages"`
-	Temperature      float64  `json:"temperature,omitempty"`
-	MaxTokens        int      `json:"max_tokens,omitempty"`
-	Stream           bool     `json:"stream,omitempty"`
-	Stop             []string `json:"stop,omitempty"`
-	RepeatLastN      int      `json:"repeat_last_n,omitempty"`
-	RepeatPenalty    float64  `json:"repeat_penalty,omitempty"`
-	TopK             int      `json:"top_k,omitempty"`
-	TopP             float64  `json:"top_p,omitempty"`
+	Model         string    `json:"model"`
+	Messages      []Message `json:"messages"`
+	Temperature   float64   `json:"temperature,omitempty"`
+	MaxTokens     int       `json:"max_tokens,omitempty"`
+	Stream        bool      `json:"stream,omitempty"`
+	Stop          []string  `json:"stop,omitempty"`
+	RepeatLastN   int       `json:"repeat_last_n,omitempty"`
+	RepeatPenalty float64   `json:"repeat_penalty,omitempty"`
+	TopK          int       `json:"top_k,omitempty"`
+	TopP          float64   `json:"top_p,omitempty"`
 }
 
 type ggufCompletionResponse struct {
-	Model       string         `json:"model"`
-	Created     int64          `json:"created"`
-	Choices     []ggufChoice   `json:"choices"`
-	Usage       Usage          `json:"usage"`
-	Object      string         `json:"object"`
+	Model   string       `json:"model"`
+	Created int64        `json:"created"`
+	Choices []ggufChoice `json:"choices"`
+	Usage   Usage        `json:"usage"`
+	Object  string       `json:"object"`
 }
 
 type ggufChoice struct {
@@ -67,11 +67,15 @@ type ggufChoice struct {
 
 func NewGGUFProvider(config GGUFProviderConfig) *GGUFProvider {
 	if config.ServerURL == "" {
-		config.ServerURL = "http://localhost:8080"
+		config.ServerURL = "http://localhost:8090"
 	}
 	return &GGUFProvider{
 		config: config,
-		client: &http.Client{Timeout: 120 * time.Second},
+		// A generation timeout shorter than the caller's own deadline silently
+		// wins, and the caller reports a generic timeout with no idea the client
+		// gave up first. The caller's context is the authority; this is only a
+		// backstop for a caller that supplies none.
+		client: &http.Client{Timeout: 15 * time.Minute},
 	}
 }
 
@@ -136,8 +140,8 @@ func (p *GGUFProvider) Analyze(ctx context.Context, req AnalysisRequest) (Analys
 	prompt := fmt.Sprintf("Analyze the following subject and provide findings.\nSubject: %s\nQuestions: %v\nResponse format: findings as bullet points, then a confidence score (0-1).", req.Subject, req.Questions)
 
 	resp, err := p.Generate(ctx, CompletionRequest{
-		Model:      req.Model,
-		Messages:   []Message{{Role: "user", Content: prompt}},
+		Model:       req.Model,
+		Messages:    []Message{{Role: "user", Content: prompt}},
 		Temperature: 0.5,
 		MaxTokens:   2048,
 		Provider:    req.Provider,
@@ -158,8 +162,8 @@ func (p *GGUFProvider) Review(ctx context.Context, req ReviewRequest) (ReviewRes
 	prompt := fmt.Sprintf("Review the following Go code for issues:\n\nFile: %s\nCode:\n%s\nQuestions: %v\n\nResponse format: list issues with severity (low/medium/high/critical), line number, and message.", req.Filepath, req.Code, req.Questions)
 
 	resp, err := p.Generate(ctx, CompletionRequest{
-		Model:      req.Model,
-		Messages:   []Message{{Role: "user", Content: prompt}},
+		Model:       req.Model,
+		Messages:    []Message{{Role: "user", Content: prompt}},
 		Temperature: 0.3,
 		MaxTokens:   2048,
 		Provider:    req.Provider,
@@ -213,10 +217,10 @@ func (p *GGUFProvider) LoadModel(ctx context.Context, modelPath string) error {
 
 	loadURL := fmt.Sprintf("%s/v1/load_model", p.config.ServerURL)
 	loadReq := ggufLoadRequest{
-		Model:        modelPath,
-		NGPULayers:   gpuLayers,
-		MainGPU:      p.config.MainGPU,
-		TensorSplit:  p.config.TensorSplit,
+		Model:       modelPath,
+		NGPULayers:  gpuLayers,
+		MainGPU:     p.config.MainGPU,
+		TensorSplit: p.config.TensorSplit,
 	}
 	body, _ := json.Marshal(loadReq)
 	httpReq2, _ := http.NewRequestWithContext(ctx, "POST", loadURL, bytes.NewReader(body))
@@ -241,12 +245,12 @@ func (p *GGUFProvider) GPUInfo() GPUInfo {
 }
 
 type GPUInfo struct {
-	Available    bool     `json:"available"`
-	Vendor       string   `json:"vendor"`
-	Device       string   `json:"device"`
-	VRAM         int64    `json:"vram_mb"`
-	NGPULayers    int      `json:"n_gpu_layers"`
-	Backend      string   `json:"backend"`
+	Available  bool   `json:"available"`
+	Vendor     string `json:"vendor"`
+	Device     string `json:"device"`
+	VRAM       int64  `json:"vram_mb"`
+	NGPULayers int    `json:"n_gpu_layers"`
+	Backend    string `json:"backend"`
 }
 
 func detectGPUInfo(config GGUFProviderConfig) GPUInfo {

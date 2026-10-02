@@ -12,6 +12,7 @@ import (
 
 	"github.com/kilo/spiral-codemaker/api"
 	"github.com/kilo/spiral-codemaker/core/canary"
+	"github.com/kilo/spiral-codemaker/core/modelcheck"
 	"github.com/kilo/spiral-codemaker/core/regression"
 	"github.com/kilo/spiral-codemaker/core/selfmodify"
 	"github.com/kilo/spiral-codemaker/core/state"
@@ -435,11 +436,17 @@ func cmdImprove(args []string) {
 	var cand selfmodify.Measurement
 	var lastErr error
 
+	// Observations feed the model-adequacy assessment. The point is that after
+	// several identical-looking failures the system says *why* rather than
+	// leaving the operator to infer it from the pattern.
+	var obs []modelcheck.Observation
+
 	for attempt := 1; attempt <= *attempts; attempt++ {
 		proposal, perr := selfmodify.ProposeTests(ctx, *modelPath, *root, *pkg, work, sourceFiles, 1, lastErr)
 		if perr != nil {
 			lastErr = perr
 			fmt.Printf("attempt %d/%d: %v\n", attempt, *attempts, perr)
+			obs = append(obs, modelcheck.Observation{Success: false, RejectionKind: perr.Error()})
 			continue
 		}
 
@@ -455,6 +462,13 @@ func cmdImprove(args []string) {
 		fmt.Printf("attempt %d/%d: candidate %s -> %s\n",
 			attempt, *attempts, selfmodify.FormatCounts(cand), shortVerdict(verdict))
 
+		obs = append(obs, modelcheck.Observation{
+			Success:          verdict.Promote,
+			Duration:         time.Duration(cand.ElapsedMS) * time.Millisecond,
+			CompletionTokens: proposal.Tokens,
+			RejectionKind:    rejectionSignal(verdict, cand),
+		})
+
 		if verdict.Promote {
 			fmt.Printf("  proposal: %s (needed %d generation attempt(s), %d tokens)\n",
 				strings.Join(proposal.Paths, ", "), proposal.Trials, proposal.Tokens)
@@ -465,6 +479,15 @@ func cmdImprove(args []string) {
 		if cand.Err != "" {
 			lastErr = fmt.Errorf("%s; compiler said: %s", verdict.Reason, firstLine(cand.Err))
 		}
+	}
+
+	// Assess the model before reporting the outcome. A run that failed for model
+	// reasons and a run that failed for harness reasons demand different actions,
+	// and the operator should not have to work out which from the log.
+	assess := modelcheck.Assess(filepath.Base(*modelPath), "structured-code", obs)
+	if !assess.Adequate {
+		fmt.Println()
+		fmt.Print(modelcheck.FormatVerdict(assess))
 	}
 
 	if verdict.Promote {
@@ -504,6 +527,22 @@ func cmdImprove(args []string) {
 func shortVerdict(v selfmodify.Verdict) string {
 	if v.Promote {
 		return "PROMOTE"
+	}
+	return v.Reason
+}
+
+// rejectionSignal extracts a classification-friendly reason from a failed trial.
+//
+// The verdict reason is written for a human; the adequacy assessment aggregates
+// reasons to spot a dominant cause, so it needs the underlying compiler text when
+// there is one. A build failure attributed to "build-failure" rather than to its
+// specific cause would hide exactly the pattern worth noticing.
+func rejectionSignal(v selfmodify.Verdict, m selfmodify.Measurement) string {
+	if m.Err != "" {
+		return m.Err
+	}
+	if !m.BuildOK {
+		return "build failure: " + v.Reason
 	}
 	return v.Reason
 }
@@ -571,7 +610,7 @@ func cmdRun(args []string) {
 	serve := fs.Bool("serve", false, "Start web dashboard after run")
 	modelDir := fs.String("models-dir", "", "Models config directory (default: <output>/models.json)")
 	hfToken := fs.String("hf-token", "", "HuggingFace API token")
-	ggufServer := fs.String("gguf-server", "", "GGUF/llama.cpp server URL (default: auto-detect localhost:8080)")
+	ggufServer := fs.String("gguf-server", "", "GGUF/llama.cpp server URL (default: 8090, override with --gguf-server)")
 	localModel := fs.String("local-model", "", "Auto-start llama.cpp server with this GGUF model file")
 	enableHF := fs.Bool("enable-hf", false, "Enable HuggingFace provider")
 	debug := fs.Bool("debug", false, "Debug mode (prints LLM responses)")
@@ -612,12 +651,12 @@ func cmdRun(args []string) {
 	}
 
 	if *ggufServer == "" {
-		*ggufServer = "http://localhost:8080"
+		*ggufServer = selfmodify.ServerURL()
 	}
 
 	// A model is present, so a local provider is worth configuring even when no
 	// other provider was requested.
-	useProviders := *enableHF || *hfToken != "" || *ggufServer != "http://localhost:8080" || *localModel != ""
+	useProviders := *enableHF || *hfToken != "" || *ggufServer != selfmodify.ServerURL() || *localModel != ""
 
 	var orch *system.Orchestrator
 	if useProviders {

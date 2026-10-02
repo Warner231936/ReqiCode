@@ -185,7 +185,7 @@ func ProposeTests(ctx context.Context, modelPath, root, pkg string, work []Uncov
 	}
 
 	reg := registry.NewModelRegistry("")
-	reg.AddProvider("gguf-local", "gguf", defaultServerURL(), "", map[string]any{
+	reg.AddProvider("gguf-local", "gguf", ServerURL(), "", map[string]any{
 		"model_path": modelPath,
 	})
 	reg.AddModel("selfmod", "gguf-local", routing.CapSpecialize, selfmodTokens, 0.2)
@@ -322,10 +322,102 @@ Write the test now.`, testPkg, fn.Name, truncate(source, 2000), exampleNote(exam
 	if selfImport := detectSelfImport(body, testPkg); selfImport {
 		return "", resp.Usage.CompletionTokens, fmt.Errorf(
 			"an internal test (package %s) must not import its own package; "+
-				"use package %s_test instead", testPkg, testPkg)
+				"use package %s_test instead", testPkg, testPkg+"_test")
+	}
+	if q := externalTestNeedsImport(body, testPkg); q != "" {
+		return "", resp.Usage.CompletionTokens, fmt.Errorf(
+			"this file is `package %s_test`, so it must import the package and qualify every "+
+				"package-level name; `%s` is called unqualified. Write `%s.%s(...)` and add the import",
+			testPkg, q, testPkg, q)
 	}
 
 	return body, resp.Usage.CompletionTokens, nil
+}
+
+// externalTestNeedsImport reports a package-level identifier that an external test
+// file called without qualifying.
+//
+// A test in `package foo_test` lives outside the package, so `Project` is not in
+// scope -- it must be `foo.Project` with the import present. This is the mirror
+// image of the import-cycle mistake, and a model reliably produces one while
+// fixing the other: told not to self-import, it switches to the external package
+// and then forgets to qualify. Observed exactly that with a 14B coder model.
+func externalTestNeedsImport(body, pkgName string) string {
+	first := strings.TrimSpace(body)
+	if !strings.HasPrefix(first, "package "+pkgName+"_test") {
+		return ""
+	}
+
+	imported := false
+	for _, line := range strings.Split(body, "\n") {
+		trimmed := strings.TrimSpace(strings.TrimSpace(line))
+		trimmed = strings.Trim(trimmed, `"`)
+		if strings.HasSuffix(trimmed, "/"+pkgName) || trimmed == pkgName {
+			imported = true
+			break
+		}
+	}
+	if imported {
+		return ""
+	}
+
+	// The package is not imported at all, so any unqualified call to a
+	// package-level name is unresolvable. Report the first one found.
+	for _, name := range targetSymbols(body, pkgName) {
+		return name
+	}
+	return ""
+}
+
+// targetSymbols returns identifiers mentioned in the body that look like
+// references to the package under test.
+//
+// Heuristic by necessity: the validator has no type information, so it looks for
+// bare capitalised identifiers used in call position, which is what an unqualified
+// package-level reference looks like in practice.
+func targetSymbols(body, pkgName string) []string {
+	// Names declared locally in this file are fine.
+	local := map[string]bool{}
+	for _, line := range strings.Split(body, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "func ") {
+			name := strings.TrimSpace(strings.TrimPrefix(trimmed, "func "))
+			if idx := strings.IndexAny(name, "( \t"); idx > 0 {
+				local[name[:idx]] = true
+			}
+		}
+		if strings.HasPrefix(trimmed, "import ") {
+			continue
+		}
+	}
+
+	var found []string
+	seen := map[string]bool{}
+	for _, line := range strings.Split(body, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "//") ||
+			strings.HasPrefix(trimmed, "package ") || strings.HasPrefix(trimmed, "import ") ||
+			strings.HasPrefix(trimmed, "func ") {
+			continue
+		}
+		for _, field := range strings.Fields(trimmed) {
+			name := strings.Trim(field, "(),{};:=.")
+			if name == "" || local[name] || seen[name] {
+				continue
+			}
+			if name[0] < 'A' || name[0] > 'Z' {
+				continue
+			}
+			// Only a call or a value use is a reference; a bare word in prose is
+			// not. Requiring a following "(" or "=" keeps comments out.
+			if strings.Contains(trimmed, name+"(") || strings.Contains(trimmed, name+" =") ||
+				strings.Contains(trimmed, name+" :=") {
+				seen[name] = true
+				found = append(found, name)
+			}
+		}
+	}
+	return found
 }
 
 // detectSelfImport reports whether a file declares `package X` and also imports
@@ -538,9 +630,17 @@ func packageNameOf(pkg string) string {
 	return trimmed
 }
 
-func defaultServerURL() string {
+// DefaultServerURL is where the local llama.cpp server is expected.
+//
+// 8090 rather than 8080 because the Agent Manager occupies 8080 on this machine.
+// Keeping it in one exported constant means a port conflict is fixed in one place
+// rather than three, which is exactly the bug that a hardcoded literal invites.
+const DefaultServerURL = "http://localhost:8090"
+
+// ServerURL resolves the inference endpoint, preferring an explicit override.
+func ServerURL() string {
 	if v := os.Getenv("SPIRAL_GGUF_SERVER"); v != "" {
 		return v
 	}
-	return "http://localhost:8080"
+	return DefaultServerURL
 }
