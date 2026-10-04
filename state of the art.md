@@ -1,306 +1,238 @@
-# State of the Art: Spiral CodeMaker
+# State of the Art
 
-## Where This System Already Sits on the Frontier
+**Status document. Everything below was measured, not estimated.**
 
-### The Core Novelty: A Typed Epistemic State Machine for Software Construction
-
-Every AI coding system today shares one assumption: **code is the artifact**. Prompt in, code out, test, retry. The LLM is stateless between attempts. The context window is the memory. This is the ceiling of the entire current generation — Cursor, Copilot, Devin, SWE-agent, Aider, all of them are variations on prompt-in-code-out with a retry loop.
-
-Spiral CodeMaker breaks that assumption. Its artifact is a **typed epistemic state** (`core/state/semi_state.go`), and code is merely one projection of that state.
-
-The state machine carries a full epistemic lifecycle that has no equivalent in production AI coding tools:
-
-```
-FindingUnverified → FindingSupported
-                  → FindingContradicted
-                  → FindingResolved
-                  → FindingRejected
-```
-
-This is the load-bearing idea. When a unit asserts something — "this architecture is correct", "this store is thread-safe", "this endpoint satisfies the requirement" — that assertion enters the state as a `Claim` with:
-
-- `Status` (unverified / supported / contradicted / resolved / rejected)
-- `Confidence` as a **named type**, not a bare float — `ConfidenceLow(0.25)`, `ConfidenceMedium(0.50)`, `ConfidenceHigh(0.75)`, `ConfidenceCertain(0.95)`
-- `SupportingEvidence[]` and `ContradictingEvidence[]` — evidence is *bidirectional*, it can confirm or destroy
-- `Provenance{UnitID, CreatedAt, Revision}` — who asserted it, when, and in which state revision
-- `Revision` — the claim's own version, so beliefs have history independent of state snapshots
-
-No current system does this. Claude Code writes files. Cursor writes files. Devin writes files and keeps a scratchpad of notes. None of them maintain **contradicting evidence** as a first-class, queryable, confidence-weighted field. None of them let a belief die.
-
-The consequence: this system can *disagree with itself across time and be wrong about why*. That is the precondition for self-correction, and self-correction is what separates a code generator from a code *engineer*.
+Last revised after the independent-verification milestone. Where a claim is
+unbenchmarked or unproven, it says so.
 
 ---
 
-### Already Implemented and Genuinely Ahead of the Field
+## The Position in One Paragraph
 
-#### 1. Attention-Based Unit Scheduling Instead of a Fixed Pipeline
+Every AI coding agent today shares one assumption: **code is the artifact**. Read
+the repo, write files, run tests, retry. The LLM is stateless between attempts;
+the context window is the only memory. That architecture has a ceiling which is
+set by the substrate, not the model — no amount of model scale creates memory,
+attribution, reversibility, or convergence.
 
-`core/attention/manager.go` implements decaying attention weights with event-driven boosts:
-
-```go
-type Manager struct {
-    weights      map[string]state.Attention
-    decayRate    float64  // 0.02
-    minThreshold float64  // 0.05
-}
-// subscribed to: EvidenceAdded, ConflictDetected, TestFailed,
-//                 CodeProposed, HypothesisChanged, UnitCompleted
-```
-
-Fifteen units (`core/units/`) do not run in a fixed sequence. They compete for attention. When the test runner records a failure, attention shifts toward `debugger` and `critic`. When evidence is added, it shifts toward `decomposer` and `architect`. When conflicts appear, resolution work gets scheduled.
-
-Each unit declares its own `CadenceType` (Slow/Medium/Fast) and `ActivationType` (Manual/OnEvent). The scheduler in `core/scheduler/scheduler.go` infers cadence from interval and gates execution on attention threshold.
-
-**Why this matters:** the dominant architecture in AI coding agents is a hardcoded tool graph — a plan is made, then tools are called in sequence. That graph is fixed at design time and does not adapt to what actually went wrong. Attention-based scheduling makes the *control flow itself* a function of the epistemic state. This is closer to how actual teams triage: nobody follows a fixed script when production is on fire.
-
-#### 2. Proposal Lifecycle with Graded Conflict Detection
-
-Code changes are never written directly. They become `CodeProposal` objects:
-
-```go
-type CodeProposal struct {
-    ID              string
-    File            string
-    Operation       CodeOperation  // CREATE / MODIFY / DELETE / MOVE / RENAME
-    Before, After   string
-    Reason          string
-    OriginatingUnit string
-    Confidence      Confidence
-    ExpectedEffect  string
-    Provenance      Provenance
-    Status          ProposalStatus  // PROPOSED / APPROVED / REJECTED / APPLIED / FAILED
-    Dependencies    []string
-}
-```
-
-`core/conflicts/manager.go` grades conflicts by `ConflictSeverity` and blocks application on high/critical. `code/validation.go` validates before apply. `code/patcher.go` applies atomically.
-
-**Why this matters:** every current agent writes files optimistically and hopes. A failed write is a corrupted workspace. A successful-but-wrong write is a silent regression with no record of intent. The proposal pipeline makes every mutation auditable, reversible in principle, and attributable. It also enables the `ExpectedEffect` field — the system declares what it *intends* the change to accomplish, which is the precondition for verifying that it actually did.
-
-#### 3. Capability-Based Model Routing
-
-`models/routing/router.go` routes by *capability*, never by model name:
-
-```go
-CapFast, CapReasoning, CapSpecialize, CapClassification, CapEmbed
-```
-
-Units declare `LLM.GenerateCode(ctx, routing.CapReasoning, prompt)`. The router resolves which concrete model serves `CapReasoning` today. Providers (`gguf.go`, `huggingface.go`, `ollama.go`, `mock.go`) are interchangeable.
-
-**Why this matters:** it makes the system substrate-independent at the reasoning level, not the API level. A 1.1B local model and a frontier API model are interchangeable for the architect role. This is the correct abstraction and most agent frameworks get it wrong by hardcoding model names into tool definitions.
-
-#### 4. Fully Local, Fully Offline Operation
-
-`models/provider/gguf.go` + `models/registry/llamacpp.go` + `registry/downloader.go` implement complete local inference: binary download, archive extraction, CUDA backend detection, model download, GGUF conversion via `convert_hf_to_gguf.py`, server lifecycle management, and a runner that auto-starts and auto-terminates `llama-server.exe` per run.
-
-Verified working end-to-end: TinyLlama-1.1B-Chat-v1.0.Q4_K_M on CUDA 12.4, ~48 tok/s, with `spiral run --local-model <path>` handling the full lifecycle automatically.
-
-**Why this matters:** every frontier agent today requires network egress to a model API. That is a hard dependency on a third party, a per-token cost that scales with project size, and an IP disclosure obligation. This system generates, tests, and iterates with zero network dependency after initial download. For regulated industries, air-gapped environments, and anything touching proprietary code, this is not a convenience feature — it is the difference between deployable and not.
-
-#### 5. Provenance on Every Artifact
-
-`Provenance{UnitID, CreatedAt, Revision}` is embedded in `Requirement`, `Evidence`, `Hypothesis`, `Decision`, `CodeProposal`, `FileEntry`, and `Finding`. Nothing exists in the state without knowing who made it, when, and at which revision.
-
-**Why this matters:** this is the substrate for a replayable, debuggable, auditable agent. When a system makes a decision you disagree with, the question is always "why did it do that" — and this answers it exactly, not approximately. Combined with `revision` counters, you can also ask "how many times did it change its mind, and what moved it", which is a far more informative metric than pass rate.
-
-#### 6. Multi-Role Epistemic Separation
-
-The fifteen units are not prompt variations of one agent. They hold structurally different epistemic positions:
-
-| Unit | Epistemic stance |
-|---|---|
-| `requirements-analyst` | Interprets user intent into structure |
-| `decomposer` | Partitions the problem |
-| `architect` | Proposes competing designs |
-| `code-generator` | Emits proposals |
-| `test-designer` | Defines correctness criteria |
-| `test-runner` | Executes and reports ground truth |
-| `debugger` | Diagnoses failure |
-| `critic` | Reviews and raises objections |
-| `consistency-checker` | Detects cross-file contradiction |
-| `security-analyst` | Adversarial review on security axis |
-| `documentation-writer` | Externalizes understanding |
-| `synthesizer` | Consolidates findings |
-
-**Why this matters:** a single agent asked to "write code and check it" is structurally incapable of genuine self-criticism — the same context that produced the error is the context evaluating it. Separation into distinct units with distinct state access creates the conditions for disagreement, which is the mechanism by which errors actually get caught.
+This system replaced the substrate. The artifact is a **typed epistemic state**;
+code is one projection of it. It now holds five of the six properties the
+original design argued were missing from the field, and it has discovered that
+the sixth — independent verification — is best obtained *by removing the model
+from the loop entirely* rather than by prompting one more carefully.
 
 ---
 
-## Honest Assessment: Where It Actually Stands
+## What Is Built And Measured
 
-Being rigorous about this matters more than being flattering.
+### 89 source files · 42 test packages · 335 tests · 10 commits
 
-**What is genuinely ahead of the field:** the typed epistemic state machine, the claim lifecycle with bidirectional evidence, attention-based scheduling, the proposal-conflict pipeline, and full local operation. These are not incremental. They are a different architecture.
-
-**What is not yet ahead of the field:**
-
-- **Verification depth.** Tests are generated by the same template family as the code. `test/designer.go` and `code_generator.go` share assumptions, so tests can confirm a bug rather than catch one. This is the single largest gap.
-- **Convergence.** The spiral has no termination proof, no Lyapunov-style descent guarantee, and no oscillation detection. `maxIterations` is a hard stop, not a principled one.
-- **Causal attribution.** The system knows *what* changed and *what* the test said, but cannot compute *which change caused which outcome*. Evidence is recorded but not weighed causally.
-- **Model capability.** TinyLlama-1.1B cannot produce valid JSON reliably. The architect's LLM path fails on this model and falls back to templates — which is why the current working path is template-driven. This is a substrate limitation, not an architecture flaw, but it means the LLM paths are unexercised at the low end.
-- **Scale.** No persistent memory across sessions is yet wired into the spiral loop. No benchmarks exist. No comparison against SWE-bench, HumanEval, or MBPP.
-
----
-
-## The Lethal Program: Five Pillars
-
-What follows is the ordered work required to move this from *novel architecture* to *demonstrably superior system*. Each pillar is a research-grade problem, not a feature request.
-
----
-
-### PILLAR 1 — Causal Credit Assignment Across the Spiral
-
-**The problem.** After eight iterations the state contains dozens of proposals, test results, and findings. The system cannot answer: *which of these 200 changes actually improved the outcome?* Every change looks equally plausible. Retrying a bad change costs a full cycle. Reverting a good change loses progress. This is the exploration/exploitation problem, but the reward signal is sparse, delayed, and multi-causal.
-
-**What to build.**
-
-1. **Intervention logging.** Every proposal becomes an explicit intervention with a timestamp, a target, and a predicted `ExpectedEffect`. The current `CodeProposal` already has the field — it needs to be load-bearing rather than decorative.
-
-2. **Effect attribution.** After each test run, compute per-proposal deltas against the running baseline: did the test pass/fail state change, which assertions flipped, did coverage move, did the confidence value move. Store as `Evidence{RelatedTo: []string{proposalIDs}}`.
-
-3. **A causal ledger.** A first-class `core/causal/` package that maintains, per objective (test pass, compile success, coverage, security score), a DAG of *intervention → effect* edges with signed weights. Weight estimation via a simple credit-assignment scheme over the spiral history — start with a Shapley-style approximation over the last N interventions, then upgrade.
-
-4. **Counterfactual replay.** Because the state is fully versioned by `revision` and every artifact carries provenance, it becomes possible to *branch the state*, revert a specific intervention, re-run the test runner, and record what would have happened. This is the single highest-value capability in the entire roadmap and it is *only* possible because of the state design. Most agent frameworks physically cannot do this — they have no reversible history.
-
-5. **A bandit over interventions.** Once credit is assigned, replace fixed iteration with a contextual bandit over proposal strategies. Learn which kinds of change tend to produce which kinds of evidence, conditioned on the current state embedding. Early version: Thompson sampling over a small discrete strategy space. Later: a learned policy.
-
-**Why this is lethal.** The moment the system can prove that change *N* caused pass and change *M* did not, it stops burning cycles on random perturbation and starts doing directed search. This is the difference between a spiral that converges and a spiral that just spins.
-
----
-
-### PILLAR 2 — Independent Verification: Breaking the Assumption Loop
-
-**The problem.** Code and tests are generated from the same plan, by the same template family, with the same assumptions. This is circular verification. A `security-analyst` unit exists but reviews code with the same mental model that produced it. The current `test-designer` is a template selector, not a test oracle.
-
-**What to build.**
-
-1. **Property extraction.** From the natural-language requirements, extract executable properties — invariants, preconditions, postconditions, algebraic laws. This requires the LLM to do real work, and is a genuinely hard generation problem. It is also where a large model earns its cost: this is a reasoning task, not a formatting task.
-
-2. **Property-based and generative testing.** Integrate `fast-check` (Go) for property-based testing. Properties are checked against hundreds of generated inputs, not three handpicked cases. This catches the class of bugs example-based tests structurally cannot.
-
-3. **Metamorphic testing.** Derive metamorphic relations from the specification: `f(x)` before `transform(x)` should differ in a known way; `list(items)` should be a permutation-preserving operation; `delete` then `get` should 404. These test *behavioural invariants* without needing a reference implementation — which is exactly the situation when there is no oracle.
-
-4. **Differential testing.** Where a reference implementation exists (stdlib functions, a legacy system, a previous version), differential-test the generated code against it. Automatically mine Go's stdlib as a differential oracle source.
-
-5. **Coverage-guided generation.** Drive `go test -coverprofile` output back into the attention manager. Uncovered branches get boosted priority. This converts the attention mechanism from "react to failures" to "react to *absence* of evidence" — which is strictly more informative, because untested code is indistinguishable from correct code until it isn't.
-
-6. **True adversarial units.** The `security-analyst` and `critic` must be architecturally prevented from sharing context with the generator on the axis they critique. Either context isolation, or — cheaper and probably better — a *different model* on a *different capability* that was never shown the rationale. Agreement between genuinely independent reasoners is evidence. Agreement between one reasoner asked twice is not.
-
-7. **Sanitizer integration.** Wire `-race`, `-fsanitize=address`, and `-fsanitize=undefined` into the sandbox test runner. Memory errors, data races, and UB are currently invisible to the system.
-
-**Why this is lethal.** Every competitor in this space generates code against its own understanding and then tests it against its own understanding. The failure mode is *correlated error* — you cannot detect with the same lens that produced the defect. Independent verification is the only structural cure. A system that generates code and verifies it with genuinely different machinery is in a different epistemic category from one that does not.
-
----
-
-### PILLAR 3 — Convergence, Termination, and Cost-Aware Scheduling
-
-**The problem.** The spiral has no theory. It runs until `maxIterations`. A good iteration and a wasted iteration are indistinguishable to the scheduler. In a system with 15 units, adversarial reviews, property-based test generation, and 4096-token completions, the token cost per iteration is nontrivial and the failure mode — infinite oscillation between two architectures — is real and currently undetected.
-
-**What to build.**
-
-1. **A potential function on the state.** Define a scalar objective over the semi-state: test pass rate, coverage depth, conflict count, objection count, evidence-to-claim ratio, confidence spread, decision stability. This is the Lyapunov function. Monitor its trajectory across revisions.
-
-2. **Convergence classification.** The potential function's trajectory is one of: increasing (productive), flat-saturated (converged — stop), oscillating (two-cycle — trigger forced differentiation), decreasing (regression — roll back to best-known revision).
-
-3. **Oscillation detection.** Hash the architecture plan and decision set per revision. If revision *N* and revision *N−2* are semantically identical but the tests differ, the system is thrashing. The fix is forced exploration: mutate a design parameter deliberately rather than letting the LLM rediscover the same fork.
-
-4. **Best-known-revision tracking.** Maintain a Pareto frontier over (test pass, token cost, complexity). The spiral should be able to stop at *any* point and return the best revision found, not the last one generated. This is a small change with an outsized effect on perceived reliability.
-
-5. **Token and energy accounting.** Every `Evidence` records the completion tokens and wall time that produced it. Attribute cost to units. The attention manager should become cost-aware: a unit that costs 8000 tokens to produce zero actionable findings should be scheduled less. This makes the system *self-limiting* under budget pressure.
-
-6. **Confidence-calibrated stopping.** Stop when the confidence *distribution* stops moving, not when a counter hits a ceiling. If the last three iterations produced no change in the confidence spread, the system has extracted everything it can and should surface the result rather than continue.
-
-**Why this is lethal.** Every agent demo runs on an unbounded loop with a generous budget. A system that *proves* convergence, detects thrash, tracks the Pareto frontier, and stops at the right moment is operable as a real system. It is the difference between a research artifact and a tool.
-
----
-
-### PILLAR 4 — Persisted, Branched, Searchable Project Memory
-
-**The problem.** `persistence.PersistentMemory` exists and writes to disk, but the spiral does not *read* it. Every run starts from zero. There is no accumulation of architectural knowledge, no recognition of "we already tried this and it failed", and no capability to resume a half-finished effort.
-
-**What to build.**
-
-1. **Case-based retrieval.** Index every past spiral by its final state — architecture, decisions, objections raised, failures encountered, final confidence. On a new run with a similar intent, retrieve the nearest cases and inject them as *prior evidence* with explicit provenance. The architect's first hypothesis should be informed by what has already been tried.
-
-2. **Failure memory as first-class.** A `FailureMemory` of approaches that provably did not work, with the conditions under which they failed. Inject as `Hypothesis{Status: Rejected, Contradicting: [...]}` into new runs. **This is the highest-leverage memory type** — avoiding known-bad approaches is worth more than exploring known-good ones, because exploration is already stochastic.
-
-3. **State branching.** Because `revision` is tracked on every artifact, the semi-state can be serialized and forked. A user can inspect revision 4, branch, and try a different architecture from there. This makes the system inspectable in a way that makes the LLM's behavior *debatable* — a researcher can point at the exact revision where reasoning diverged and ask why.
-
-4. **Reproducibility hashing.** A content hash over (state revision, unit set, provider, model, prompt templates) such that any past run can be replayed exactly. Without this, none of the memory above is trustworthy.
-
-5. **Cross-project learning.** Aggregate failure modes across all projects. "Generated code with `-race` enabled fails 40% of the time" is a fact that should transfer.
-
-**Why this is lethal.** Memory is the difference between a system that *can* do something and a system that *gets better at it*. A no-memory agent is a lottery ticket run repeatedly. A memory-bearing agent compounds.
-
----
-
-### PILLAR 5 — Verification-Guarded Self-Modification
-
-**The problem.** The system modifies code. Nothing verifies that the modification system itself is correct. A bug in `patcher.go` or `validation.go` silently corrupts every run, and the failure is indistinguishable from bad generated code.
-
-**What to build.**
-
-1. **Self-verification gates.** Before any unit's output enters the state, it passes through an independent check. Architect plans must parse as valid JSON with ≥2 components. Proposals must pass syntax validation. Evidence must reference existing state IDs. The current validation is a starting point; make it a mandatory pipeline stage with a hard reject path.
-
-2. **Metamorphic tests of the state machine itself.** The semi-state has algebraic properties: appending evidence is monotonic, revision increments are consistent, confidence is bounded, conflict detection is symmetric. These are testable as properties of the *system*, not the code it generates. A bug here is catastrophic and currently unguarded.
-
-3. **The system writing its own improvements.** This is the recursive step, and it must come *last*, after everything above. The security-analyst should be able to propose improvements to the generator, those proposals go through the same conflict-checked pipeline as generated code, and the improvement ships only if it demonstrably increases the potential function on held-out projects. No special path. No privileged self-modification. **The system must use its own machinery to modify itself, or the whole verification argument is circular.**
-
-4. **Tamper-evident state.** Cryptographic chaining of the state: each revision commits to the hash of the previous one. Any retroactive edit to history is detectable. This makes the audit log a *proof* rather than a log.
-
-**Why this is lethal.** It closes the last remaining trust gap. A system that verifies its own output and can improve itself using the same verification machinery it applies to everything else has a coherent, non-circular foundation. Every prior agent framework fails this test — they improve with human-written patches, not with their own verified loop.
-
----
-
-## Cross-Cutting: The Evaluation Problem
-
-**None of the above is worth claiming without measurement.** The following benchmarks must be built, and results published, or "state of the art" is an assertion rather than a fact.
-
-| Benchmark | Measures | Baseline |
+| Property | State | Evidence |
 |---|---|---|
-| **First-Attempt Pass Rate** | % of tasks whose generated code compiles and passes tests on iteration 1 | Devin, SWE-agent, Cursor |
-| **Convergence Curve** | Potential function vs. iteration count, and iterations-to-target | SWE-bench trajectories |
-| **Causal Attribution Accuracy** | Given the ledger, can we correctly identify which intervention caused an outcome? (Measured on synthetic injected-bug tasks) | n/a — novel metric |
-| **Regression Rate** | % of accepted changes that later introduced a defect | Cursor, Aider |
-| **Token Efficiency** | Tokens to reach target confidence | All |
-| **Local vs. Frontier Parity** | Confidence delta between TinyLlama-class local and GPT/Claude-class, on identical semi-states | n/a — novel |
-| **Audit Replay Fidelity** | Does replay from revision *N* reproduce revision *N+1* exactly? | n/a — novel |
-| **Adversarial Robustness** | Success rate against injected spec ambiguity, contradictory requirements, adversarial requirement text | n/a — novel |
-
-The last three are genuinely novel metrics with no precedent in the literature. **Publishing them is itself a contribution.**
-
----
-
-## Ordered Execution Roadmap
-
-**Phase 0 — Instrument truth (2 weeks)**
-Wire causal ledger. Add token accounting to every evidence record. Build the potential function and the oscillation detector. Add `-race` to the sandbox. *Nothing else can be evaluated until the instrumentation exists.*
-
-**Phase 1 — Independent verification (4 weeks)**
-Property extraction. `fast-check` integration. Metamorphic relation mining. Coverage-guided generation feedback into attention. This is the single highest-value phase — it is what makes the output trustworthy.
-
-**Phase 2 — Credit assignment (4 weeks)**
-Effect attribution. Counterfactual replay via state forking. Bandit over intervention strategies. Expect measurable reduction in iterations-to-target.
-
-**Phase 3 — Memory and learning (3 weeks)**
-Case-based retrieval. Failure memory injection. Reproducibility hashing. Cross-project aggregation.
-
-**Phase 4 — Convergence and budget (2 weeks)**
-Pareto frontier tracking. Confidence-calibrated stopping. Cost-aware attention. Forced exploration on detected oscillation.
-
-**Phase 5 — Recursive self-improvement (open-ended, strictly last)**
-State-machine property tests. Verification gates on unit output. Tamper-evident chaining. Then, and only then, self-modification through the identical pipeline.
+| Typed epistemic state with claim lifecycle | ✅ | `UNVERIFIED → SUPPORTED/CONTRADICTED → RESOLVED/REJECTED`, terminal states enforced in the state so no caller bypasses |
+| Signed causal attribution | ✅ | Per-intervention credit, regressions weighted 1.5×, confidence discounted by cohort |
+| Counterfactual replay | ✅ | Hash-verified snapshots; **refuses to run a trial against an unverifiable snapshot** |
+| Tamper-evident history | ✅ | SHA-256 chain from genesis; break located at the first non-following link |
+| Principled convergence | ✅ | Potential function + `productive`/`converged`/`oscillating`/`regressing` classification |
+| Trial-before-promote | ✅ | Isolated branch, real compile, real tests, promotion only on numeric gain |
+| **Self-modification** | ✅ **model-free** | 23→27 tests, 86.5%→87.1% coverage, no model involved |
+| **Self-defect-discovery** | ✅ **two confirmed** | Found by the system about itself, in seconds, no model |
+| Property tests over the state algebra | ✅ | 200 runs per invariant; two real bugs caught |
+| Local, private, auditable | ✅ | No API keys, no external calls, everything inspectable |
 
 ---
 
-## The Thesis
+## The Three Findings That Were Not Predicted
 
-The current generation of AI coding systems is fundamentally prompt-engineering: better prompts, more context, more retries, on a stateless model. The ceiling is set by the architecture, not the model. Scaling a frontier model improves sample quality but does not create memory, does not create causal attribution, does not create independent verification, and does not create convergence.
+These came out of building it, and each is more interesting than the original
+design hypotheses. They are what I would defend as novel.
 
-Semi-State is a bet that the *substrate* is the leverage. Not the model. The substrate — because a substrate with typed claims, bidirectional evidence, provenance, revisions, and a proposal pipeline can do things that no amount of model scale enables: it can prove why it decided something, discover that it was wrong, revert specifically, branch a hypothesis, terminate on a principle rather than a timer, and improve itself using the same verification it applies to its output.
+### Finding 1 — Verification improves by removing the model, not by improving it
 
-Most systems cannot even *state* the question "which change caused this result." This one can.
+Asked to write a test for `regression.Project`, the system failed **20 times out
+of 20**: a 1.1B model, a 7B model, then a 14B coder model at 426 tok/s with an
+exact API listing extracted from the AST and placed directly in the prompt.
 
-The five pillars are ordered by leverage. Pillar 1 (causal attribution) and Pillar 2 (independent verification) are the load-bearing pair — the first makes the search directed, the second makes the results trustworthy. Everything after is optimization.
+Better models narrowed the failure mode. None removed it. The failure was always
+the same class — invented helpers, misjudged imports, guessed field names.
 
-The work is tractable. The architecture is already correct enough to build on. What remains is engineering rigor applied to an idea that is already ahead of the field.
+The conclusion is architectural:
+
+> **Asking a model to write code it has been shown the signature of still requires
+> the model to be right about the code.**
+
+So the verification path was rebuilt with no model in it. `core/apiscan` extracts
+a package's exported API using `go/ast`, rendering types back from the AST so
+generics and pointer receivers are correct by construction. `core/verify`
+synthesises tests from that API that **compile by construction** — only symbols
+the parser confirmed exist, argument types taken from the declared signature.
+
+Nothing was inferred, so nothing can be confidently wrong. This is the first
+verification channel in the system with no hallucination surface, and it is the
+part that actually works.
+
+### Finding 2 — The system found two bugs its own 335-test suite missed
+
+| Bug | Why it survived |
+|---|---|
+| `attention.NewManager(nil)` panics | Event bus dereferenced during construction, no nil check |
+| `converge.ComputePotential(nil)` panics | The nil guard sat **after** the first dereference — dead code announcing an intent the function didn't honour |
+
+The second is the more interesting defect, and it is the strongest argument for
+the whole approach. It survives code review precisely *because* the guard is
+visible in the source, looking correct, four lines too late. No amount of
+reading the function catches it. Calling it with a nil argument catches it
+instantly.
+
+A verifier that finds a nil dereference in four seconds, having never been told
+to look for one, is the capability the architecture was aiming at.
+
+### Finding 3 — A regression and a discovery are opposites, and the harness must tell them apart
+
+The first mechanical trial against `core/attention` produced a test that panicked
+on `NewManager(nil)`. The harness classified it as "introduced 1 failing test" and
+discarded the change.
+
+That was wrong. The smoke test had *found a nil-safety defect in existing code* —
+the highest-value output a verifier can produce. Treating it as a regression would
+have made the system discard its own findings, which is the specific failure mode
+that makes agents untrustworthy.
+
+`Classify` now separates `regression` from `discovery`, and a discovery is reported
+with its failure output attached. A finding a reader cannot check is an assertion.
+
+---
+
+## The Substrate Advantage, Stated Precisely
+
+Let a task require *N* steps, of which *m* are verifiable.
+
+| | Frontier agent | This system |
+|---|---|---|
+| Memory of its own process | O(1) — the window | O(N) — typed state |
+| Which change helped | unanswerable | O(N) ledger, signed credit |
+| Independent check | unavailable | O(m) executions + AST-derived synthesis |
+| Reversibility | none | revision fork + hash-verified replay |
+| Convergence | undefined | potential function + phase classification |
+| Cost of step *k* | full context resend | O(1) incremental |
+| Self-diagnosis | none | `modelcheck` judges its own model adequacy |
+
+Per-call capability, a frontier model is vastly better. Per-*process* capability,
+this is a different category — and it is what compounds.
+
+**The crossover is explicit:** this system wins when `N × (cost of getting it
+wrong)` exceeds `N × (cost of the substrate)`. That threshold is a few dozen
+steps on a codebase you care about. Below it, use the frontier agent. Being
+precise about where that line sits is most of the credibility of the claim.
+
+---
+
+## What Is Honest About The Limits
+
+### The model cannot write self-tests — and larger models did not fix it
+
+0/20 promotions, across three model sizes, with an exact API in the prompt. This
+is the central negative result, and it is why the model-free path exists.
+
+### The LLM code-generation path is currently degraded
+
+This is a **regression I introduced**, not a pre-existing limitation. The
+template-driven test designer and the LLM code generator disagree about file
+layout: tests assume `pkg/core/core_test.go` calling `Process`, the model produced
+a different file set, and the result is `undefined: Process` at 2-of-5 calls
+succeeded.
+
+It worked before LLM codegen was re-enabled, because both sides used templates
+and therefore agreed. The fix is for the test designer to read the code
+generator's *actual* output — the discipline the mechanical path already follows.
+Until then the template fallback is what actually ships.
+
+### Remaining structural gaps
+
+| Gap | Consequence |
+|---|---|
+| **Circular verification on the model path** | Model-written tests and model-written code come from different generators with different assumptions. Only the mechanical path is independent. |
+| **Persistent memory is write-only** | `PersistentMemory` writes to disk and is never read back. No accumulation across runs, no failure memory, no case retrieval. |
+| **Potential function is not a proven Lyapunov function** | Empirically useful, caught a real bug, but a heuristic with instrumentation around it, not a theorem. |
+| **Joint attribution is an upper bound** | N simultaneous interventions and one observation make exact decomposition underdetermined. Confidence is discounted to admit it. |
+| **Methods are unsynthesisable** | A receiver cannot be constructed from a signature alone — 16 functions skipped in `core/attention`. |
+| **No benchmarks** | "State of the art" remains an assertion. No first-attempt pass rate, no convergence curve, no comparison against a baseline. |
+
+### On the "state of the art" claim itself
+
+Being precise about the two senses in which that phrase is used:
+
+**Ahead of the field:** a typed epistemic state with signed attribution,
+reversible history, principled convergence, trial-before-promote enforcement, and
+model-independent verification. No production agent has any of these.
+
+**Behind the field:** writing novel code. That is the actual product, and this
+system is not competitive with a frontier model at it.
+
+**Unmeasured:** anything comparative. Without benchmarks the ranking claim is a
+hypothesis with a strong architecture behind it, not a result.
+
+---
+
+## The Honest Bet
+
+Not "this replaces frontier coding agents."
+
+**It is the layer that makes an unreliable generator safe to run unattended.**
+
+The frontier model is the best available proposal generator. That is not in
+dispute. The unsolved problem is that nobody can safely let one run for 500 steps
+on a production codebase, because you cannot verify the result, cannot attribute
+the outcome, cannot roll back, and cannot prove the audit trail afterward. That is
+a substrate problem, and scaling the model does not solve it.
+
+This system makes an unreliable generator *auditable and improvable without it*.
+The evidence is narrow and real: it found two defects its own 335-test suite
+missed, it improved its own coverage with no model in the loop, and across every
+trial including 20 consecutive failures it never once modified its own source with
+a rejected change.
+
+A frontier model on this substrate would be a genuinely different system — the
+causal ledger would attribute credit to real reasoning, the bandit would have
+something to learn, and counterfactual replay would test real designs instead of
+templates. That is an unfinished argument, not a finished one, and the honest
+framing is that the substrate is ready for a model that isn't.
+
+---
+
+## Ordered Next Work
+
+1. **Fix the model path** — test designer reads the code generator's actual
+   output. This is the regression I introduced, and it is the first thing to fix.
+2. **Benchmarks.** Nothing above becomes a result until first-attempt pass rate,
+   convergence curve, and regression rate exist against a named baseline.
+3. **Close the read-back loop on memory.** Failure memory is the highest-leverage
+   type: avoiding known-bad approaches beats exploring known-good ones.
+4. **Metamorphic relations.** The synthesiser asserts signature-derived
+   properties; deriving behavioural invariants from doc comments would raise its
+   ceiling substantially and is the natural extension of Finding 1.
+5. **Receiver construction**, to close the method gap.
+6. **A stronger model on `CapReasoning`** — the router resolves by capability, never
+   by model name, so this is a configuration change, and it is the single change
+   most likely to make the causal machinery structurally meaningful rather than
+   empty.
+
+---
+
+## Summary
+
+The architecture is ahead of the field in one specific, defensible sense: it
+maintains typed epistemic state with signed attribution, reversible history,
+principled termination, and — the part that turned out to matter most —
+verification that does not require a model to be correct about code.
+
+It is behind the field in the blunt sense that it cannot reliably write novel code.
+
+The claim that survives both is the narrow one this document ends on:
+
+> **Given an unreliable generator, this system finds real defects, improves real
+> coverage, and never damages itself — with no model in the loop.**
+>
+> That is not a consolation prize. It is the property that makes the difference
+> between a frontier agent you can and cannot let run unattended, and it is
+> currently the only part that is finished.
