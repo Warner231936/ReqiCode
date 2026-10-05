@@ -3,9 +3,12 @@ package units
 import (
 	"context"
 	"fmt"
+	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/kilo/spiral-codemaker/code/proposals"
+	"github.com/kilo/spiral-codemaker/core/apiscan"
 	"github.com/kilo/spiral-codemaker/core/events"
 	"github.com/kilo/spiral-codemaker/core/state"
 	"github.com/kilo/spiral-codemaker/models/routing"
@@ -43,7 +46,22 @@ func (u *TestDesigner) Run(ctx context.Context, semiState *state.SemiState, bus 
 	plan := semiState.GetArchitecturePlan()
 	var testFiles []TestFileSpec
 	// Use template-based test generation based on architecture plan
-	testFiles = generateTestFilesForPlan(plan)
+	// Tests must be derived from the files the code generator actually produced.
+	//
+	// It used to be derived from the plan, which assumed the template layout.
+	// That worked while both sides used templates, and broke the moment LLM
+	// generation was enabled: the model produced its own file set, the template
+	// tests still called Process, and the workspace failed to compile with
+	// `undefined: Process`. A test that assumes a layout nobody promised is the
+	// same circular-verification bug in a different place.
+	//
+	// When the plan and the generated files disagree, the generated files win:
+	// they are what the compiler will see.
+	if len(semiState.GetGeneratedFiles()) > 0 {
+		testFiles = u.deriveTestsFromGenerated(semiState, plan)
+	} else {
+		testFiles = generateTestFilesForPlan(plan)
+	}
 	semiState.AddEvidence(state.Evidence{
 		Type:       state.EvidenceObservation,
 		Content:    fmt.Sprintf("Using template-based test generation for %d files", len(testFiles)),
@@ -246,6 +264,163 @@ func inferTestFilePath(lines []string) string {
 	return "test.go"
 }
 
+// deriveTestsFromGenerated builds tests against the code generator's actual
+// output rather than the plan's assumed layout.
+//
+// It worked while both sides used templates, and broke the moment LLM generation
+// was enabled: the model produced its own file set, the template tests still
+// called Process, and the workspace failed to compile with `undefined: Process`.
+// A test that assumes a layout nobody promised is the circular-verification bug
+// in a different place.
+//
+// When the plan and the generated code disagree, the generated code wins: it is
+// what the compiler will see.
+func (u *TestDesigner) deriveTestsFromGenerated(ss *state.SemiState, plan *state.ArchitecturePlan) []TestFileSpec {
+	generated := ss.GetGeneratedFiles()
+	if len(generated) == 0 {
+		return generateTestFilesForPlan(plan)
+	}
+
+	root := u.rt.Workspace.RootPath()
+
+	// Scan every generated package, not just the first one alphabetically.
+	//
+	// The first file is typically cmd/cli/main.go, whose package contains main and
+	// none of the symbols the template tests call. Deciding the layout from one
+	// arbitrary file is how a fix for the original bug introduces a worse one.
+	dirs := map[string]bool{}
+	for p := range generated {
+		if strings.HasSuffix(p, "_test.go") {
+			continue // a generated test is not a source of API truth
+		}
+		dirs[filepath.ToSlash(filepath.Dir(p))] = true
+	}
+
+	names := make([]string, 0, len(dirs))
+	for d := range dirs {
+		names = append(names, d)
+	}
+	sort.Strings(names)
+
+	// A package carrying the symbols the template tests expect means the generated
+	// layout matches the plan's assumption and those tests are safe.
+	for _, dir := range names {
+		api, err := apiscan.Scan(filepath.Join(root, filepath.FromSlash(dir)))
+		if err != nil {
+			continue
+		}
+		if _, ok := api.Lookup("Process"); ok {
+			return generateTestFilesForPlan(plan)
+		}
+		if _, ok := api.Lookup("NewInMemoryStore"); ok {
+			return generateTestFilesForPlan(plan)
+		}
+		if _, ok := api.Lookup("NewStore"); ok {
+			return generateTestFilesForPlan(plan)
+		}
+	}
+
+	// No generated package matches the assumed layout. Synthesise smoke tests
+	// against the package that exposes the most callable functions, which is the
+	// most substantial thing the generator produced.
+	var best *apiscan.API
+	var bestDir string
+	var bestCount int
+	for _, dir := range names {
+		api, err := apiscan.Scan(filepath.Join(root, filepath.FromSlash(dir)))
+		if err != nil {
+			continue
+		}
+		if n := len(api.Functions); n > bestCount {
+			best, bestDir, bestCount = api, dir, n
+		}
+	}
+	if best == nil {
+		ss.AddEvidence(state.Evidence{
+			Type:       state.EvidenceObservation,
+			Content:    "generated code could not be scanned on disk; using plan layout for tests",
+			Strength:   state.ConfidenceLow,
+			Provenance: state.NewProvenance(u.ID()),
+		})
+		return generateTestFilesForPlan(plan)
+	}
+
+	return testsFromAPI(best, bestDir)
+}
+
+// testsFromAPI emits smoke tests for a model-shaped API.
+//
+// The assertions are deliberately minimal: a call with zero arguments that must
+// not panic. Inventing an expected value would be guessing, and guessing is the
+// failure mode this path exists to eliminate.
+func testsFromAPI(api *apiscan.API, pkgDir string) []TestFileSpec {
+	pkgName := filepath.Base(pkgDir)
+
+	var out []TestFileSpec
+	for _, fn := range api.Functions {
+		if fn.Receiver != "" || len(fn.Params) > 3 {
+			continue
+		}
+
+		args := make([]string, 0, len(fn.Params))
+		synthesisable := true
+		for _, p := range fn.Params {
+			lit, ok := apiscan.ZeroValue(p.Type)
+			if !ok {
+				synthesisable = false
+				break
+			}
+			args = append(args, lit)
+		}
+		if !synthesisable {
+			continue
+		}
+
+		call := fn.Name + "(" + strings.Join(args, ", ") + ")"
+		content := fmt.Sprintf(`package %s
+
+import "testing"
+
+// TestGenerated_%s is synthesised from the generated code's own signature.
+//
+// It asserts only that the call is well-typed and does not panic on zero
+// arguments. Inventing an expected value would be guessing, and guessing is
+// exactly what a synthesised test must not do.
+func TestGenerated_%s(t *testing.T) {
+	_ = %s
+}
+`, pkgName, sanitiseTestName(fn.Name), sanitiseTestName(fn.Name), call)
+
+		out = append(out, TestFileSpec{
+			Path:        filepath.ToSlash(filepath.Join(pkgDir, "zz_generated_test.go")),
+			Content:     content,
+			Description: "smoke test for " + fn.Name,
+		})
+		// One file per function: a single file would redeclare the package and
+		// declare the same function name more than once.
+		out[len(out)-1].Path = filepath.ToSlash(filepath.Join(pkgDir, "zz_"+sanitiseTestName(fn.Name)+"_test.go"))
+	}
+	return out
+}
+
+func sanitiseTestName(name string) string {
+	var b strings.Builder
+	for i, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z':
+			b.WriteRune(r)
+		case r >= '0' && r <= '9':
+			if i == 0 {
+				b.WriteRune('N')
+			}
+			b.WriteRune(r)
+		default:
+			b.WriteRune('_')
+		}
+	}
+	return b.String()
+}
+
 func generateTestFilesForPlan(plan *state.ArchitecturePlan) []TestFileSpec {
 	if plan == nil {
 		return generateDefaultTestFiles()
@@ -307,8 +482,9 @@ const testCoreFile = `package core
 
 import (
 	"os"
-	"path/filepath"
 	"strings"
+	"path/filepath"
+	"sort"
 	"testing"
 )
 
