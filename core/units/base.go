@@ -55,16 +55,16 @@ func NewBaseUnit(id string, role state.UnitRole, name string, cadence state.Cade
 	}
 }
 
-func (u *BaseUnit) ID() string                    { return u.id }
-func (u *BaseUnit) Role() state.UnitRole          { return u.role }
-func (u *BaseUnit) Name() string                  { return u.name }
-func (u *BaseUnit) Cadence() state.CadenceType    { return u.cadence }
+func (u *BaseUnit) ID() string                       { return u.id }
+func (u *BaseUnit) Role() state.UnitRole             { return u.role }
+func (u *BaseUnit) Name() string                     { return u.name }
+func (u *BaseUnit) Cadence() state.CadenceType       { return u.cadence }
 func (u *BaseUnit) Activation() state.ActivationType { return u.activation }
-func (u *BaseUnit) Dependencies() []string        { return u.deps }
-func (u *BaseUnit) Confidence() state.Confidence  { return u.confidence }
-func (u *BaseUnit) AttentionWeight() float64      { return u.attention }
-func (u *BaseUnit) IsActive() bool                { return u.active }
-func (u *BaseUnit) Provenance() state.Provenance  { return u.provenance }
+func (u *BaseUnit) Dependencies() []string           { return u.deps }
+func (u *BaseUnit) Confidence() state.Confidence     { return u.confidence }
+func (u *BaseUnit) AttentionWeight() float64         { return u.attention }
+func (u *BaseUnit) IsActive() bool                   { return u.active }
+func (u *BaseUnit) Provenance() state.Provenance     { return u.provenance }
 
 func (u *BaseUnit) SetConfidence(c state.Confidence) {
 	u.mu.Lock()

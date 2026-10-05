@@ -8,9 +8,9 @@ import (
 )
 
 type Registry struct {
-	mu     sync.RWMutex
-	units  map[string]Unit
-	bus    *events.EventBus
+	mu    sync.RWMutex
+	units map[string]Unit
+	bus   *events.EventBus
 }
 
 func NewRegistry(bus *events.EventBus) *Registry {
@@ -91,9 +91,9 @@ type UnitResult struct {
 }
 
 type ExecutionRecord struct {
-	UnitID  string         `json:"unit_id"`
-	Timestep int64         `json:"timestep"`
-	Events  []events.Event `json:"events"`
-	Error   string         `json:"error,omitempty"`
-	Duration int64         `json:"duration_ms"`
+	UnitID   string         `json:"unit_id"`
+	Timestep int64          `json:"timestep"`
+	Events   []events.Event `json:"events"`
+	Error    string         `json:"error,omitempty"`
+	Duration int64          `json:"duration_ms"`
 }

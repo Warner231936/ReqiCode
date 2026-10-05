@@ -70,9 +70,9 @@ func (u *ConsistencyChecker) Run(ctx context.Context, semiState *state.SemiState
 	var evts []events.Event
 	for _, issue := range issues {
 		semiState.AddEvidence(state.Evidence{
-			Type:     state.EvidenceObservation,
-			Content:  fmt.Sprintf("consistency: %s", issue.Issue),
-			Strength: state.ConfidenceHigh,
+			Type:       state.EvidenceObservation,
+			Content:    fmt.Sprintf("consistency: %s", issue.Issue),
+			Strength:   state.ConfidenceHigh,
 			Provenance: state.NewProvenance(u.ID()),
 		})
 		evts = append(evts, events.Event{
@@ -89,9 +89,9 @@ func (u *ConsistencyChecker) Run(ctx context.Context, semiState *state.SemiState
 
 	if len(issues) == 0 {
 		semiState.AddEvidence(state.Evidence{
-			Type:     state.EvidenceObservation,
-			Content:  "consistency check passed: all components present and code well-formed",
-			Strength: state.ConfidenceHigh,
+			Type:       state.EvidenceObservation,
+			Content:    "consistency check passed: all components present and code well-formed",
+			Strength:   state.ConfidenceHigh,
 			Provenance: state.NewProvenance(u.ID()),
 		})
 		u.rt.Attention.Boost("documentation_writer", "consistency verified, documentation ready", 0.2)

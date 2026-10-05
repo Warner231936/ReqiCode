@@ -44,9 +44,9 @@ func (u *Debugger) Run(ctx context.Context, semiState *state.SemiState, bus *eve
 
 	details := u.analyzeFailure(latestFailure)
 	semiState.AddEvidence(state.Evidence{
-		Type:     state.EvidenceAnalysis,
-		Content:  fmt.Sprintf("analyzed test failure: %d issues found", len(details)),
-		Strength: state.ConfidenceHigh,
+		Type:       state.EvidenceAnalysis,
+		Content:    fmt.Sprintf("analyzed test failure: %d issues found", len(details)),
+		Strength:   state.ConfidenceHigh,
 		Provenance: state.NewProvenance(u.ID()),
 	})
 

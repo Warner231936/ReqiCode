@@ -72,9 +72,9 @@ func (u *DocumentationWriter) Run(ctx context.Context, semiState *state.SemiStat
 	validated.Status = state.ProposalApplied
 
 	semiState.AddEvidence(state.Evidence{
-		Type:     state.EvidenceObservation,
-		Content:  "documentation written: README.md",
-		Strength: state.ConfidenceMedium,
+		Type:       state.EvidenceObservation,
+		Content:    "documentation written: README.md",
+		Strength:   state.ConfidenceMedium,
 		Provenance: state.NewProvenance(u.ID()),
 	})
 

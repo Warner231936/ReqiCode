@@ -46,9 +46,9 @@ func (u *TestRunnerUnit) Run(ctx context.Context, semiState *state.SemiState, bu
 	semiState.AddTestResult(tr)
 
 	ev := state.Evidence{
-		Type:     state.EvidenceObservation,
-		Content:  fmt.Sprintf("tests completed: %s", tr.Status),
-		Strength: state.ConfidenceHigh,
+		Type:       state.EvidenceObservation,
+		Content:    fmt.Sprintf("tests completed: %s", tr.Status),
+		Strength:   state.ConfidenceHigh,
 		Provenance: state.NewProvenance(u.ID()),
 	}
 	if tr.Status == state.TestFailed {

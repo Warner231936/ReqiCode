@@ -58,20 +58,20 @@ func (u *Synthesizer) Run(ctx context.Context, semiState *state.SemiState, bus *
 			semiState.UpdateHypothesisStatus(selectedID, state.HypothesisAccepted)
 
 			semiState.AddEvidence(state.Evidence{
-				Type:      state.EvidenceAnalysis,
-				Content:   "synthesized: " + plan.AlternativeID + " accepted as working design",
-				Strength:  state.ConfidenceHigh,
+				Type:       state.EvidenceAnalysis,
+				Content:    "synthesized: " + plan.AlternativeID + " accepted as working design",
+				Strength:   state.ConfidenceHigh,
 				Provenance: state.NewProvenance(u.ID()),
 				RelatedTo:  []string{selectedID},
 			})
 
 			semiState.RecordFinding(state.FindingRecord{
 				Claim: state.Claim{
-					Content:     plan.Description + " is the correct design choice",
-					Source:      "synthesis",
-					Status:      state.FindingSupported,
-					Confidence:  state.ConfidenceHigh,
-					Provenance:  state.NewProvenance(u.ID()),
+					Content:    plan.Description + " is the correct design choice",
+					Source:     "synthesis",
+					Status:     state.FindingSupported,
+					Confidence: state.ConfidenceHigh,
+					Provenance: state.NewProvenance(u.ID()),
 				},
 				PreviousStatus: state.FindingUnverified,
 				NewStatus:      state.FindingSupported,
@@ -91,9 +91,9 @@ func (u *Synthesizer) Run(ctx context.Context, semiState *state.SemiState, bus *
 
 		if allPassed {
 			semiState.AddEvidence(state.Evidence{
-				Type:     state.EvidenceObservation,
-				Content:  "synthesis: all tests passed, implementation provisionally accepted",
-				Strength: state.ConfidenceHigh,
+				Type:       state.EvidenceObservation,
+				Content:    "synthesis: all tests passed, implementation provisionally accepted",
+				Strength:   state.ConfidenceHigh,
 				Provenance: state.NewProvenance(u.ID()),
 			})
 			semiState.SetConfidence(state.ConfidenceHigh)

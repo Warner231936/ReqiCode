@@ -50,9 +50,9 @@ func (u *Decomposer) Run(ctx context.Context, semiState *state.SemiState, bus *e
 	}
 
 	semiState.AddEvidence(state.Evidence{
-		Type:     state.EvidenceObservation,
-		Content:  fmt.Sprintf("decomposed %d requirements into %d subtasks", len(reqs), len(subtasks)),
-		Strength: state.ConfidenceMedium,
+		Type:       state.EvidenceObservation,
+		Content:    fmt.Sprintf("decomposed %d requirements into %d subtasks", len(reqs), len(subtasks)),
+		Strength:   state.ConfidenceMedium,
 		Provenance: state.NewProvenance(u.ID()),
 	})
 

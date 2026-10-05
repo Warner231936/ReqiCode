@@ -46,9 +46,9 @@ func (u *Critic) Run(ctx context.Context, semiState *state.SemiState, bus *event
 
 	if allTestsPassed && hasAnyTests {
 		semiState.AddEvidence(state.Evidence{
-			Type:     state.EvidenceCodeReview,
-			Content:  "critique: all tests pass, no immediate objections to correctness",
-			Strength: state.ConfidenceHigh,
+			Type:       state.EvidenceCodeReview,
+			Content:    "critique: all tests pass, no immediate objections to correctness",
+			Strength:   state.ConfidenceHigh,
 			Provenance: state.NewProvenance(u.ID()),
 		})
 

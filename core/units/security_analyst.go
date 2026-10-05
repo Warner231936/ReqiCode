@@ -68,9 +68,9 @@ func (u *SecurityAnalyst) Run(ctx context.Context, semiState *state.SemiState, b
 	}
 
 	semiState.AddEvidence(state.Evidence{
-		Type:     state.EvidenceAnalysis,
-		Content:  fmt.Sprintf("security scan completed: %d issues found across %d files", issuesFound, len(files)),
-		Strength: state.ConfidenceMedium,
+		Type:       state.EvidenceAnalysis,
+		Content:    fmt.Sprintf("security scan completed: %d issues found across %d files", issuesFound, len(files)),
+		Strength:   state.ConfidenceMedium,
 		Provenance: state.NewProvenance(u.ID()),
 	})
 
