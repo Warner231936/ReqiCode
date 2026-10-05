@@ -743,6 +743,14 @@ func validateLLMFiles(files []FileSpec, plan *state.ArchitecturePlan) bool {
 			return false
 		}
 
+		// An unused import is a guaranteed compile error, so it is always worth
+		// catching here rather than paying a full trial to discover it. Observed:
+		// a generated test file importing "sort" without using it, which failed
+		// the whole workspace.
+		if unused := unusedImports(content); len(unused) > 0 {
+			return false
+		}
+
 		pkg := packageName(path)
 		if seenSymbols[pkg] == nil {
 			seenSymbols[pkg] = map[string]bool{}
@@ -916,6 +924,86 @@ func goFollowsPackageClause(content string) bool {
 
 // codePlaceholderMarkers are literal tokens a model emits when it echoes the
 // prompt's examples instead of answering.
+// unusedImports finds imports the body never references.
+//
+// A lexical check on the package qualifier: if an import's final path element
+// never appears followed by a dot in the body, it is unused. Exact for the
+// overwhelmingly common case; a false positive costs one retry while a false
+// negative costs a compile failure of the whole workspace.
+func unusedImports(content string) []string {
+	var specs []string
+	inBlock := false
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(trimmed, "import ("):
+			inBlock = true
+		case inBlock && trimmed == ")":
+			inBlock = false
+		case inBlock:
+			if trimmed != "" && !strings.HasPrefix(trimmed, "//") {
+				specs = append(specs, trimmed)
+			}
+		case strings.HasPrefix(trimmed, "import "):
+			specs = append(specs, strings.TrimPrefix(trimmed, "import "))
+		}
+	}
+
+	type qualified struct{ path, name string }
+	var imports []qualified
+	for _, spec := range specs {
+		spec = strings.TrimSpace(spec)
+		// Aliased imports need type information to resolve, so they are skipped.
+		if spec == "" || strings.Contains(spec, " ") || strings.HasPrefix(spec, "//") {
+			continue
+		}
+		path := strings.Trim(spec, `"`)
+		if path == "" {
+			continue
+		}
+		name := path
+		if idx := strings.LastIndex(name, "/"); idx >= 0 {
+			name = name[idx+1:]
+		}
+		imports = append(imports, qualified{path: path, name: name})
+	}
+
+	// Strip the import block before searching, so an import is not counted as a
+	// use of itself.
+	var body strings.Builder
+	inBlock = false
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "import (") {
+			inBlock = true
+			continue
+		}
+		if inBlock {
+			if trimmed == ")" {
+				inBlock = false
+			}
+			continue
+		}
+		if strings.HasPrefix(trimmed, "import ") {
+			continue
+		}
+		body.WriteString(line)
+		body.WriteString("\n")
+	}
+	text := body.String()
+
+	var unused []string
+	for _, i := range imports {
+		if i.name == "_" || i.name == "." {
+			continue
+		}
+		if !strings.Contains(text, i.name+".") {
+			unused = append(unused, i.path)
+		}
+	}
+	return unused
+}
+
 var codePlaceholderMarkers = []string{"<path>", "<name>", "<description>", "...", "path/to", "your-", "TODO:", "PLACEHOLDER"}
 
 func isPlaceholderText(s string) bool {

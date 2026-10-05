@@ -81,6 +81,37 @@ func TestExtractSingleFileRejectsEcho(t *testing.T) {
 	}
 }
 
+func TestGateRejectsUnusedImport(t *testing.T) {
+	// An unused import is a guaranteed compile error, so it must never reach the
+	// workspace. Observed: a generated test file importing "sort" without using
+	// it failed the entire build.
+	bad := "package core\n\nimport (\n\t\"os\"\n\t\"sort\"\n\t\"testing\"\n)\n\nfunc TestX(t *testing.T) {\n\tif os.Getenv(\"X\") != \"\" {\n\t\tt.Skip()\n\t}\n}\n"
+	if validateLLMFiles([]FileSpec{{Path: "pkg/core/x_test.go", Content: bad}}, nil) {
+		t.Error("an unused import must be rejected before the workspace is written")
+	}
+}
+
+func TestGateAcceptsUsedImports(t *testing.T) {
+	good := "package core\n\nimport (\n\t\"fmt\"\n\t\"testing\"\n)\n\nfunc TestX(t *testing.T) {\n\tif fmt.Sprint(1) != \"\" {\n\t\tt.Log(\"x\")\n\t}\n}\n"
+	if !validateLLMFiles([]FileSpec{{Path: "pkg/core/x_test.go", Content: good}}, nil) {
+		t.Error("a file whose imports are all used must be accepted")
+	}
+}
+
+func TestUnusedImportsDetection(t *testing.T) {
+	cases := map[string][]string{
+		"package a\nimport \"fmt\"\nfunc f(){ fmt.Sprint(1) }\n":                 nil,
+		"package a\nimport \"fmt\"\nfunc f(){}\n":                                {"fmt"},
+		"package a\nimport (\n\t_ \"os\"\n\t\"fmt\"\n)\nfunc f(){fmt.Sprint(1)}": nil,
+	}
+	for src, want := range cases {
+		got := unusedImports(src)
+		if len(got) != len(want) {
+			t.Errorf("unusedImports(%.40q) = %v, want %v", src, got, want)
+		}
+	}
+}
+
 func TestGateRejectsEmpty(t *testing.T) {
 	if validateLLMFiles(nil, nil) {
 		t.Error("no files must be rejected")
