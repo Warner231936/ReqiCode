@@ -10,29 +10,49 @@ import (
 	"github.com/kilo/spiral-codemaker/models/routing"
 )
 
-// DefaultTimeout bounds every LLM call.
+// DefaultTimeout bounds structured-response calls (analysis, review) that
+// have no token budget to size a deadline from.
 //
 // Without this a single unresponsive provider hangs the entire spiral. The
 // orchestrator's context has no deadline of its own, so an LLM call inherits
 // unbounded patience -- observed as a ten-minute hang against a dead server.
-//
-// The value is deliberately short. Planning is a single structured response; if
-// the model cannot produce one within this window something is wrong with the
-// server or the model, and waiting longer converts a diagnostic failure into an
-// unusable run. Callers expecting genuinely long work override it.
-const DefaultTimeout = 90 * time.Second
+const DefaultTimeout = 150 * time.Second
 
 // Token budgets per call shape.
 //
-// Code generation used to request 4096 tokens for every call. On a local model
-// that is roughly eighty seconds of generation per file, and a model asked for
-// more than it needs tends to fill the budget rather than stop. Planning needs
-// far less than code, so the budgets are separated instead of sharing one
-// generous number.
+// Code generation used to request 4096 tokens for every call. On a local
+// model that is roughly eighty seconds of generation per file, and a model
+// asked for more than it needs tends to fill the budget rather than stop.
+// Planning needs far less than code, so the budgets are separated instead of
+// sharing one generous number.
 const (
 	planningTokens = 1200
 	codeTokens     = 2048
 )
+
+// Per-call deadline sizing for generation.
+//
+// A single fixed timeout is wrong for local models, where generation speed
+// is the bottleneck rather than the server. A 2048-token code response at a
+// measured 15-20 tok/s needs over two minutes, while a 1200-token plan needs
+// one; a 90-second constant killed legitimate generation and forced the
+// pipeline onto templates. Deriving the deadline from the token budget lets
+// each call take the time its shape requires, while the cap keeps a genuinely
+// hung server from stalling the spiral for good.
+const (
+	callTimeoutBase     = 30 * time.Second
+	callTimeoutPerToken = 100 * time.Millisecond
+	callTimeoutMax      = 10 * time.Minute
+)
+
+// callTimeout derives a deadline from a generation token budget.
+func callTimeout(maxTokens int) time.Duration {
+	d := callTimeoutBase + time.Duration(maxTokens)*callTimeoutPerToken
+	if d > callTimeoutMax {
+		d = callTimeoutMax
+	}
+	return d
+}
 
 type LLMClient struct {
 	router  *routing.Router
@@ -104,7 +124,9 @@ func NewLLMClient(router *routing.Router) *LLMClient {
 	}
 }
 
-// WithTimeout overrides the per-call timeout.
+// WithTimeout overrides the deadline for structured-response calls
+// (analysis, review). Generation deadlines are derived from the token
+// budget and are not affected.
 func (c *LLMClient) WithTimeout(d time.Duration) *LLMClient {
 	if d > 0 {
 		c.timeout = d
@@ -132,15 +154,17 @@ func (c *LLMClient) LastLLMCall() int {
 	return 0
 }
 
-// bounded returns a context with a deadline derived from the caller's context.
+// bounded returns a context with a deadline derived from the caller's
+// context.
 //
-// Deriving from the parent rather than replacing it is deliberate: a caller that
-// sets a shorter deadline must still be honoured.
-func (c *LLMClient) bounded(ctx context.Context) (context.Context, context.CancelFunc) {
+// Deriving from the parent rather than replacing it is deliberate: a
+// caller that sets a shorter deadline must still be honoured. When the
+// parent has no deadline, d supplies one sized to the call's shape.
+func (c *LLMClient) bounded(ctx context.Context, d time.Duration) (context.Context, context.CancelFunc) {
 	if _, hasDeadline := ctx.Deadline(); hasDeadline {
 		return ctx, func() {}
 	}
-	return context.WithTimeout(ctx, c.timeout)
+	return context.WithTimeout(ctx, d)
 }
 
 func (c *LLMClient) Generate(ctx context.Context, capability routing.ModelCapability, prompt string, maxTokens int, temperature float64) (string, error) {
@@ -160,7 +184,7 @@ func (c *LLMClient) Generate(ctx context.Context, capability routing.ModelCapabi
 		return "", fmt.Errorf("provider %s is not available", p.Name())
 	}
 
-	callCtx, cancel := c.bounded(ctx)
+	callCtx, cancel := c.bounded(ctx, callTimeout(maxTokens))
 	defer cancel()
 
 	start := time.Now()
@@ -206,7 +230,7 @@ func (c *LLMClient) Analyze(ctx context.Context, capability routing.ModelCapabil
 		return provider.AnalysisResult{}, fmt.Errorf("provider %s is not available", p.Name())
 	}
 
-	callCtx, cancel := c.bounded(ctx)
+	callCtx, cancel := c.bounded(ctx, c.timeout)
 	defer cancel()
 
 	start := time.Now()
@@ -235,7 +259,7 @@ func (c *LLMClient) Review(ctx context.Context, capability routing.ModelCapabili
 		return provider.ReviewResult{}, fmt.Errorf("provider %s is not available", p.Name())
 	}
 
-	callCtx, cancel := c.bounded(ctx)
+	callCtx, cancel := c.bounded(ctx, c.timeout)
 	defer cancel()
 
 	start := time.Now()

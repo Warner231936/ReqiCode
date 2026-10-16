@@ -1,0 +1,136 @@
+{
+  "version": 1,
+  "workspace": "D:\\AI\\ReqiCode",
+  "models": {
+    "backends": [
+      {
+        "name": "ollama",
+        "type": "ollama",
+        "base_url": "http://127.0.0.1:11434",
+        "model": "llama3.2:3b",
+        "timeout_sec": 900
+      },
+      {
+        "name": "openai-8090",
+        "type": "openai",
+        "base_url": "http://127.0.0.1:8090/v1",
+        "timeout_sec": 900
+      }
+    ],
+    "routes": {
+      "planner": {"backend": "openai-8090", "model": "models-cache\\Qwen3.5-9B-Q5_K_S.gguf", "temperature": 0.2, "max_tokens": 4096},
+      "coder": {"backend": "openai-8090", "model": "models-cache\\Qwen3.5-9B-Q5_K_S.gguf", "temperature": 0.2, "max_tokens": 4096},
+      "summarizer": {"backend": "openai-8090", "model": "models-cache\\Qwen3.5-9B-Q5_K_S.gguf", "temperature": 0.2, "max_tokens": 4096},
+      "reviewer": {"backend": "openai-8090", "model": "models-cache\\Qwen3.5-9B-Q5_K_S.gguf", "temperature": 0.2, "max_tokens": 4096}
+    },
+    "auto_start_llamacpp": false,
+    "llama_cpp_binary": "D:\\AI\\ReqiCode\\third_party\\llama-cpp\\llama-server.exe",
+    "model_dirs": [
+      "D:\\AI\\ReqiCode\\models-cache",
+      "D:\\AI\\ReqiCode\\Models",
+      "D:\\AI\\ReqiCode\\models",
+      "D:\\AI\\Models",
+      "D:\\AI\\Qwen3.6-27B",
+      "D:\\AI\\ReqiCode",
+      "D:\\AI\\gguf",
+      "D:\\AI\\unlocked",
+      "C:\\Users\\m\\.ollama\\models"
+    ]
+  },
+  "safety": {
+    "auto_approve_safe": true,
+    "auto_approve_confirm": false,
+    "workspace_only": true,
+    "command_timeout_sec": 600,
+    "allow_network": true,
+    "max_output_bytes": 262144
+  },
+  "limits": {
+    "max_attempts": 3,
+    "max_steps": 60,
+    "max_tool_calls": 200,
+    "max_tokens_per_call": 2048,
+    "command_timeout_sec": 600
+  },
+  "context": {
+    "max_file_bytes": 262144,
+    "max_files": 40,
+    "max_search_results": 50,
+    "include_tests": true,
+    "ignore_globs": [
+      ".git",
+      ".hg",
+      ".svn",
+      ".kilo",
+      ".agent/logs",
+      "node_modules",
+      "vendor",
+      "target",
+      "dist",
+      "build",
+      "out",
+      "__pycache__",
+      ".venv",
+      "venv",
+      ".mypy_cache",
+      ".pytest_cache",
+      ".ruff_cache",
+      ".tox",
+      ".gradle",
+      ".idea",
+      ".vscode",
+      "coverage",
+      "testdata",
+      "instrumentation",
+      "spiral-output*",
+      "models-cache",
+      "third_party",
+      "*.gguf",
+      "*.safetensors",
+      "*.bin",
+      "*.exe",
+      "*.dll",
+      "*.so",
+      "*.dylib",
+      "*.zip",
+      "*.tar",
+      "*.gz",
+      "*.7z",
+      "*.png",
+      "*.jpg",
+      "*.jpeg",
+      "*.gif",
+      "*.ico",
+      "*.pdf",
+      "*.mp4",
+      "*.mp3",
+      "*.wav",
+      "*.db",
+      "*.sqlite",
+      "*.pyc",
+      "*.pyo"
+    ],
+    "use_embeddings": true
+  },
+  "memory": {
+    "dir": ".agent",
+    "max_context_kb": 24,
+    "write_on_change": true,
+    "stale_after_days": 30
+  },
+  "logging": {
+    "dir": ".agent/logs",
+    "verbose": false,
+    "keep_runs": 20
+  },
+  "verification": {
+    "enabled": true,
+    "timeout_sec": 900
+  },
+  "agent": {
+    "mode": "implement",
+    "review_enabled": true,
+    "require_evidence": true,
+    "max_repair_rounds": 3
+  }
+}

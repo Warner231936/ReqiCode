@@ -72,11 +72,21 @@ func (u *CodeGenerator) Run(ctx context.Context, semiState *state.SemiState, bus
 	// format reliably and every trial degraded to templates while looking like
 	// it had used the LLM. With a capable model the LLM path is correct, and the
 	// validation gate below rejects malformed output rather than trusting it.
+	if u.rt.Config != nil && u.rt.Config.Debug {
+		codegenDebugf = func(format string, args ...any) { fmt.Printf(format, args...) }
+	} else {
+		codegenDebugf = func(format string, args ...any) {}
+	}
+
 	usedLLM := false
 	if u.rt.LLM != nil && u.rt.LLM.HasProvider(routing.CapSpecialize) {
 		llmFiles, err := u.generateFromLLM(ctx, plan, moduleName)
+		debug := u.rt.Config != nil && u.rt.Config.Debug
 		switch {
 		case err != nil:
+			if debug {
+				fmt.Printf("[DEBUG] code generator: LLM generation failed, falling back to templates: %v\n", err)
+			}
 			semiState.AddEvidence(state.Evidence{
 				Type:       state.EvidenceObservation,
 				Content:    fmt.Sprintf("LLM code generation failed, falling back to templates: %s", err.Error()),
@@ -84,6 +94,12 @@ func (u *CodeGenerator) Run(ctx context.Context, semiState *state.SemiState, bus
 				Provenance: state.NewProvenance(u.ID()),
 			})
 		case !validateLLMFiles(llmFiles, plan):
+			if debug {
+				fmt.Printf("[DEBUG] code generator: %d LLM files failed the validation gate, falling back to templates\n", len(llmFiles))
+				for _, f := range llmFiles {
+					fmt.Printf("[DEBUG]   rejected file: %s\n", f.Path)
+				}
+			}
 			semiState.AddEvidence(state.Evidence{
 				Type:       state.EvidenceObservation,
 				Content:    "LLM response did not satisfy the validation gate, falling back to templates",
@@ -113,6 +129,21 @@ func (u *CodeGenerator) Run(ctx context.Context, semiState *state.SemiState, bus
 
 	if !usedLLM {
 		files = generateFiles(plan, moduleName)
+	}
+
+	if u.rt.Config != nil && u.rt.Config.Debug {
+		var paths []string
+		for _, f := range files {
+			paths = append(paths, f.Path)
+		}
+		fmt.Printf("[DEBUG] code generator produced %d files: %v\n", len(files), paths)
+		if plan != nil {
+			var comps []string
+			for _, c := range plan.Components {
+				comps = append(comps, c.Path)
+			}
+			fmt.Printf("[DEBUG] plan had %d components: %v\n", len(plan.Components), comps)
+		}
 	}
 
 	for _, f := range files {
@@ -289,6 +320,13 @@ func generateFromTemplate(plan *state.ArchitecturePlan, moduleName string) []Fil
 	var files []FileSpec
 
 	for _, comp := range plan.Components {
+		// Test files belong to the test designer. Emitting a
+		// placeholder here would compile but assert nothing,
+		// and would make HasTestFiles true so the test
+		// designer skips the real smoke tests.
+		if strings.HasSuffix(comp.Path, "_test.go") {
+			continue
+		}
 		content := generateComponentCode(comp, plan, moduleName)
 		files = append(files, FileSpec{
 			Path:        comp.Path,
@@ -508,6 +546,17 @@ func (u *CodeGenerator) generateFromLLM(ctx context.Context, plan *state.Archite
 		default:
 		}
 
+		// Test files are the test designer's job, not this one's.
+		// A model asked to "write a test file" tends to return a
+		// placeholder -- an empty init() with a comment -- which
+		// compiles, asserts nothing, and then trips the test
+		// designer's HasTestFiles guard so the real smoke tests
+		// are never generated. Skipping the component here keeps
+		// the two units' responsibilities disjoint.
+		if strings.HasSuffix(c.Path, "_test.go") {
+			continue
+		}
+
 		prompt := fmt.Sprintf(`You are a Go code generator. Write exactly ONE Go file.
 
 Project: %s
@@ -573,6 +622,13 @@ Write the file now.`, plan.Description, moduleName, depList.String(), endpointLi
 // semiStateDebugf emits a diagnostic without requiring every caller to hold a
 // semi-state reference.
 var semiStateDebugf = func(format string, args ...any) {}
+
+// codegenDebugf emits code-generation diagnostics. validateLLMFiles is a
+// package-level function with no config handle, so it reports through this
+// hook rather than threading a debug flag through its signature. The
+// orchestrator points it at fmt.Printf when debug is on and restores the
+// no-op otherwise, so a debug run never leaks into a quiet one.
+var codegenDebugf = func(format string, args ...any) {}
 
 // extractSingleFile pulls one Go source file out of a model response, tolerating
 // the code fences and prose models add despite instructions.
@@ -700,39 +756,47 @@ func validateLLMFiles(files []FileSpec, plan *state.ArchitecturePlan) bool {
 	for _, f := range files {
 		path := strings.TrimSpace(f.Path)
 		if path == "" {
+			codegenDebugf("[validate] %s: empty path\n", f.Path)
 			return false
 		}
 		if seenPaths[path] {
-			// Two files claiming the same path means one overwrites the other,
-			// and which one wins is not deterministic from the model's intent.
+			codegenDebugf("[validate] %s: duplicate path\n", path)
 			return false
 		}
 		seenPaths[path] = true
 
 		if !strings.HasSuffix(path, ".go") {
+			codegenDebugf("[validate] %s: not a .go path\n", path)
 			return false
 		}
 		if strings.ContainsAny(path, `\<>"|?*`) {
+			codegenDebugf("[validate] %s: bad path characters\n", path)
 			return false
 		}
 		if strings.Contains(path, "..") {
+			codegenDebugf("[validate] %s: path traversal\n", path)
 			return false
 		}
 		if isPlaceholderText(path) {
+			codegenDebugf("[validate] %s: placeholder path\n", path)
 			return false
 		}
 
 		content := f.Content
 		if len(content) < 20 {
+			codegenDebugf("[validate] %s: content too short (%d bytes)\n", path, len(content))
 			return false
 		}
 		if !strings.Contains(content, "package ") {
+			codegenDebugf("[validate] %s: no package clause\n", path)
 			return false
 		}
 		if !startsWithPackageClause(content) {
+			codegenDebugf("[validate] %s: package clause not first\n", path)
 			return false
 		}
 		if isPlaceholderText(content) {
+			codegenDebugf("[validate] %s: placeholder content\n", path)
 			return false
 		}
 
@@ -740,6 +804,7 @@ func validateLLMFiles(files []FileSpec, plan *state.ArchitecturePlan) bool {
 		// short by the token limit looks like. It is a crude check, but the real
 		// compiler is one stage away.
 		if strings.Count(content, "{") != strings.Count(content, "}") {
+			codegenDebugf("[validate] %s: unbalanced braces (%d open, %d close)\n", path, strings.Count(content, "{"), strings.Count(content, "}"))
 			return false
 		}
 
@@ -748,6 +813,7 @@ func validateLLMFiles(files []FileSpec, plan *state.ArchitecturePlan) bool {
 		// a generated test file importing "sort" without using it, which failed
 		// the whole workspace.
 		if unused := unusedImports(content); len(unused) > 0 {
+			codegenDebugf("[validate] %s: unused imports %v\n", path, unused)
 			return false
 		}
 
@@ -755,8 +821,9 @@ func validateLLMFiles(files []FileSpec, plan *state.ArchitecturePlan) bool {
 		if seenSymbols[pkg] == nil {
 			seenSymbols[pkg] = map[string]bool{}
 		}
-		for _, sym := range declaredFuncs(content) {
+		for _, sym := range declaredSymbols(content) {
 			if seenSymbols[pkg][sym] {
+				codegenDebugf("[validate] %s: duplicate symbol %s in package %s\n", path, sym, pkg)
 				return false
 			}
 			seenSymbols[pkg][sym] = true
@@ -823,6 +890,65 @@ func declaredFuncs(content string) []string {
 	return out
 }
 
+// declaredTypes extracts top-level type names from Go source.
+//
+// A type name may be declared only once per package, so a duplicate
+// is a compile error exactly like a duplicate function. The
+// function-only extractor missed this entirely: a model that declares
+// the same type in two files -- once as an interface, once as a
+// struct -- produced a redeclaration that only the compiler caught,
+// by which point the workspace was already broken and the run still
+// reported success.
+func declaredTypes(content string) []string {
+	var out []string
+	lines := strings.Split(content, "\n")
+	inBlockComment := false
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+
+		if inBlockComment {
+			if strings.Contains(trimmed, "*/") {
+				inBlockComment = false
+			}
+			continue
+		}
+		if strings.HasPrefix(trimmed, "/*") {
+			if !strings.Contains(trimmed, "*/") {
+				inBlockComment = true
+			}
+			continue
+		}
+		if strings.HasPrefix(trimmed, "//") {
+			continue
+		}
+
+		if !strings.HasPrefix(trimmed, "type ") {
+			continue
+		}
+		rest := strings.TrimSpace(strings.TrimPrefix(trimmed, "type "))
+
+		// Generic type parameters follow the name: type Foo[T any] ...
+		name := rest
+		if idx := strings.IndexAny(name, "([ \t"); idx >= 0 {
+			name = name[:idx]
+		}
+		if name == "" {
+			continue
+		}
+		out = append(out, name)
+	}
+	return out
+}
+
+// declaredSymbols returns every package-level name a file declares:
+// functions and types. Both are single-declaration-per-package, so a
+// duplicate of either is a compile error, and both must be tracked to
+// catch a model that splits one type across two files.
+func declaredSymbols(content string) []string {
+	return append(declaredFuncs(content), declaredTypes(content)...)
+}
+
 // startsWithPackageClause reports whether the first meaningful line of a Go
 // source file is its package declaration.
 //
@@ -871,7 +997,7 @@ func dedupeDeclarations(files []FileSpec) ([]FileSpec, []string) {
 		}
 
 		collides := false
-		for _, sym := range declaredFuncs(f.Content) {
+		for _, sym := range declaredSymbols(f.Content) {
 			if seen[pkg][sym] {
 				collides = true
 				break
@@ -882,7 +1008,7 @@ func dedupeDeclarations(files []FileSpec) ([]FileSpec, []string) {
 			continue
 		}
 
-		for _, sym := range declaredFuncs(f.Content) {
+		for _, sym := range declaredSymbols(f.Content) {
 			seen[pkg][sym] = true
 		}
 		kept = append(kept, f)

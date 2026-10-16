@@ -1,5 +1,6 @@
 # Build output
 /spiral-output*/
+/spiral-e2e*/
 *.exe
 *.test
 *.out

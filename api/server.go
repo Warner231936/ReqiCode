@@ -174,6 +174,7 @@ func (s *Server) setupRoutes() {
 	mux.HandleFunc("/api/runs", s.handleRuns)
 	mux.HandleFunc("/api/runs/submit", s.handleSubmitRun)
 	mux.HandleFunc("/api/runs/", s.handleRun)
+	mux.HandleFunc("/api/engineering", s.handleEngineeringTask)
 
 	webHandler, err := web.Handler()
 	if err != nil {
@@ -385,14 +386,30 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	action := r.URL.Query().Get("action")
+	if r.Method == http.MethodDelete || action == "cancel" {
+		if s.runManager == nil {
+			http.Error(w, "daemon mode required", http.StatusServiceUnavailable)
+			return
+		}
+		if s.runManager.CancelRun(runID) {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{"status": "canceled", "run_id": runID})
+		} else {
+			http.Error(w, "run not found or not running", http.StatusNotFound)
+		}
+		return
+	}
+
 	run := s.runManager.GetRun(runID)
 	if run == nil {
 		http.Error(w, "run not found", http.StatusNotFound)
 		return
 	}
 
-	json.NewEncoder(w).Encode(map[string]any{
+	resp := map[string]any{
 		"id":          run.ID,
+		"task_id":     run.TaskID,
 		"status":      run.Status,
 		"start_time":  run.StartTime,
 		"end_time":    run.EndTime,
@@ -401,6 +418,45 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		"config":      run.Config,
 		"iterations":  s.iterationsForRun(run),
 		"files":       s.filesForRun(run),
+	}
+	if run.Result != nil {
+		resp["result"] = run.Result
+	}
+	json.NewEncoder(w).Encode(resp)
+}
+
+func (s *Server) handleEngineeringTask(w http.ResponseWriter, r *http.Request) {
+	if s.runManager == nil {
+		http.Error(w, "daemon mode required", http.StatusServiceUnavailable)
+		return
+	}
+
+	var task EngineeringTask
+	if err := json.NewDecoder(r.Body).Decode(&task); err != nil {
+		http.Error(w, fmt.Sprintf("decode error: %v", err), http.StatusBadRequest)
+		return
+	}
+	if task.Objective == "" {
+		http.Error(w, "objective is required", http.StatusBadRequest)
+		return
+	}
+	if task.TaskID == "" {
+		task.TaskID = fmt.Sprintf("eng-%d", time.Now().UnixNano())
+	}
+
+	result, err := s.runManager.SubmitEngineeringTask(task)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("submit error: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	json.NewEncoder(w).Encode(map[string]any{
+		"status":    "submitted",
+		"run_id":    result.ID,
+		"task_id":   task.TaskID,
+		"task":      task,
 	})
 }
 

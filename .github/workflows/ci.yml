@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CGO_ENABLED: 1
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.1'
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Run tests
+        run: go test ./... -v -timeout 300s
+
+  test-windows:
+    name: Test (Windows)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.1'
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Run tests
+        run: go test ./... -v -timeout 300s
+
+  release:
+    name: Build and Release
+    runs-on: ubuntu-latest
+    needs: [test, test-windows]
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.1'
+
+      - name: Build binaries
+        run: |
+          CGO_ENABLED=0 GOOS=linux go build -o spiral-linux ./cmd/spiral
+          CGO_ENABLED=0 GOOS=darwin go build -o spiral-darwin ./cmd/spiral
+          CGO_ENABLED=0 GOOS=windows go build -o spiral-windows.exe ./cmd/spiral
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            spiral-linux
+            spiral-darwin
+            spiral-windows.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

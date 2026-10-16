@@ -40,11 +40,14 @@ type RunResult struct {
 	Orch         *system.Orchestrator `json:"-"`
 	OutputPath  string             `json:"output_path"`
 	Error       string             `json:"error,omitempty"`
+	TaskID      string             `json:"task_id,omitempty"`
+	Result      *TaskResult        `json:"result,omitempty"`
 }
 
 type RunManager struct {
 	mu            sync.RWMutex
 	runs          map[string]*RunResult
+	cancelFuncs   map[string]context.CancelFunc
 	modelReg      *registry.ModelRegistry
 	ctx           context.Context
 	cancelFunc    context.CancelFunc
@@ -55,6 +58,7 @@ func NewRunManager(configPath string, eventCallback func(string, any)) *RunManag
 	ctx, cancel := context.WithCancel(context.Background())
 	return &RunManager{
 		runs:          make(map[string]*RunResult),
+		cancelFuncs:   make(map[string]context.CancelFunc),
 		modelReg:      registry.NewModelRegistry(configPath),
 		ctx:           ctx,
 		cancelFunc:    cancel,
@@ -101,6 +105,8 @@ func (rm *RunManager) SubmitRun(config RunConfig) (*RunResult, error) {
 func (rm *RunManager) executeRun(result *RunResult) {
 	rm.mu.Lock()
 	result.Status = RunStatusRunning
+	runCtx, runCancel := context.WithCancel(rm.ctx)
+	rm.cancelFuncs[result.ID] = runCancel
 	rm.mu.Unlock()
 
 	absOutput := result.OutputPath
@@ -117,12 +123,16 @@ func (rm *RunManager) executeRun(result *RunResult) {
 		})
 	}
 
+	orchCtx, orchCancel := context.WithCancel(runCtx)
+	defer orchCancel()
 	orch, err := system.NewOrchestratorWithRegistry("", absOutput, result.Config.Intent, result.Config.Iterations, rm.modelReg)
 	if err != nil {
 		rm.mu.Lock()
 		result.Status = RunStatusFailed
 		result.Error = err.Error()
 		result.EndTime = time.Now()
+		result.Result = rm.extractTaskResult(result, nil, err.Error())
+		delete(rm.cancelFuncs, result.ID)
 		rm.mu.Unlock()
 		if rm.eventCallback != nil {
 			rm.eventCallback(result.ID, map[string]any{
@@ -133,7 +143,7 @@ func (rm *RunManager) executeRun(result *RunResult) {
 		}
 		return
 	}
-
+	orch.WithContext(orchCtx)
 	result.Orch = orch
 
 	if err := orch.Run(); err != nil {
@@ -141,6 +151,8 @@ func (rm *RunManager) executeRun(result *RunResult) {
 		result.Status = RunStatusFailed
 		result.Error = err.Error()
 		result.EndTime = time.Now()
+		result.Result = rm.extractTaskResult(result, orch, err.Error())
+		delete(rm.cancelFuncs, result.ID)
 		rm.mu.Unlock()
 		if rm.eventCallback != nil {
 			rm.eventCallback(result.ID, map[string]any{
@@ -155,10 +167,10 @@ func (rm *RunManager) executeRun(result *RunResult) {
 	rm.mu.Lock()
 	result.Status = RunStatusComplete
 	result.EndTime = time.Now()
+	result.Result = rm.extractTaskResult(result, orch, "")
+	_ = orch.SaveModelConfig()
+	delete(rm.cancelFuncs, result.ID)
 	rm.mu.Unlock()
-
-	if err := orch.SaveModelConfig(); err != nil {
-	}
 
 	if rm.eventCallback != nil {
 		rm.eventCallback(result.ID, map[string]any{
@@ -172,6 +184,113 @@ func (rm *RunManager) GetRun(runID string) *RunResult {
 	rm.mu.RLock()
 	defer rm.mu.RUnlock()
 	return rm.runs[runID]
+}
+
+func (rm *RunManager) CancelRun(runID string) bool {
+	rm.mu.Lock()
+	cancel, ok := rm.cancelFuncs[runID]
+	rm.mu.Unlock()
+	if !ok {
+		return false
+	}
+	cancel()
+	rm.mu.Lock()
+	result := rm.runs[runID]
+	if result != nil {
+		result.Status = RunStatusCanceled
+		result.EndTime = time.Now()
+	}
+	delete(rm.cancelFuncs, runID)
+	rm.mu.Unlock()
+	return true
+}
+
+func (rm *RunManager) SubmitEngineeringTask(task EngineeringTask) (*RunResult, error) {
+	intent := task.Objective
+	if task.Rationale != "" {
+		intent = task.Rationale + "\n\n" + intent
+	}
+	if len(task.AcceptanceCriteria) > 0 {
+		intent += "\n\nAcceptance Criteria:\n"
+		for _, ac := range task.AcceptanceCriteria {
+			intent += "- " + ac + "\n"
+		}
+	}
+
+	config := RunConfig{
+		Intent:     intent,
+		Iterations: 3,
+	}
+	if task.WorkspacePath != "" {
+		config.OutputDir = task.WorkspacePath
+	}
+
+	result, err := rm.SubmitRun(config)
+	if err != nil {
+		return nil, err
+	}
+
+	rm.mu.Lock()
+	result.TaskID = task.TaskID
+	if task.TaskID == "" {
+		result.TaskID = result.ID
+	}
+	rm.mu.Unlock()
+
+	return result, nil
+}
+
+func (rm *RunManager) extractTaskResult(result *RunResult, orch *system.Orchestrator, runErr string) *TaskResult {
+	taskResult := &TaskResult{
+		TaskID:    result.TaskID,
+		Objective: result.Config.Intent,
+		StartedAt: result.StartTime,
+	}
+
+	if result.EndTime.After(result.StartTime) {
+		taskResult.DurationMs = result.EndTime.Sub(result.StartTime).Milliseconds()
+	}
+	taskResult.CompletedAt = result.EndTime
+
+	if runErr != "" {
+		taskResult.Status = TaskStatusFailed
+		taskResult.ErrorSummary = runErr
+		taskResult.VerificationStatus = "failed"
+		return taskResult
+	}
+
+	taskResult.Status = TaskStatusVerified
+	taskResult.VerificationStatus = "passed"
+
+	if orch != nil {
+		ss := orch.SemiState()
+		if ss != nil {
+			taskResult.TestResults = ss.GetTestResults()
+			chainValid := ss.VerifyChain()
+			if chainValid.Valid {
+				taskResult.VerificationStatus = "passed"
+			} else {
+				taskResult.VerificationStatus = "chain_invalid"
+			}
+		}
+
+		if orch.Workspace() != nil {
+			files, _ := orch.Workspace().ListFiles()
+			taskResult.ArtifactLocations = files
+			plan := ss.GetArchitecturePlan()
+			if plan != nil {
+				taskResult.FilesChanged = make([]FileChange, 0, len(plan.Components))
+				for _, c := range plan.Components {
+					taskResult.FilesChanged = append(taskResult.FilesChanged, FileChange{
+						Path:      c.Path,
+						Operation: "create",
+					})
+				}
+			}
+		}
+	}
+
+	return taskResult
 }
 
 func (rm *RunManager) ListRuns() []*RunResult {

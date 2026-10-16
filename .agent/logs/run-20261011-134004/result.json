@@ -1,0 +1,70 @@
+{
+  "task": {
+    "id": "20261011-134004-write-a-go-function-called-ispalindrome-a6cf",
+    "description": "Write a Go function called IsPalindrome that checks if a string reads the same forwards and backwards",
+    "mode": "explore",
+    "status": "blocked",
+    "created_at": "2026-10-11T06:40:04.3097534-07:00",
+    "updated_at": "2026-10-11T06:40:11.8042869-07:00",
+    "started_at": "0001-01-01T00:00:00Z",
+    "finished_at": "2026-10-11T06:40:11.8042869-07:00",
+    "steps": null,
+    "current_step": 0,
+    "attempts": 1,
+    "max_attempts": 3,
+    "history": [
+      {
+        "number": 1,
+        "started_at": "2026-10-11T06:40:11.7803894-07:00",
+        "ended_at": "2026-10-11T06:40:11.8042869-07:00",
+        "verified": false,
+        "note": "language model call failed: llm: role \"planner\" failed on 2 backend(s): ollama: llm/ollama: status 400: {\"error\":\"invalid model name\"} (after openai-8090: llm/openai: server error: request (8804 tokens) exceeds the available context size (8192 tokens), try increasing it)"
+      }
+    ],
+    "files_changed": null,
+    "files_read": null,
+    "tests": null,
+    "blockers": [
+      "language model call failed: llm: role \"planner\" failed on 2 backend(s): ollama: llm/ollama: status 400: {\"error\":\"invalid model name\"} (after openai-8090: llm/openai: server error: request (8804 tokens) exceeds the available context size (8192 tokens), try increasing it)"
+    ],
+    "context": {
+      "ecosystem": "go",
+      "files": [
+        "go.mod"
+      ],
+      "build_cmd": [
+        "go build ./..."
+      ],
+      "test_cmd": [
+        "go test ./..."
+      ]
+    },
+    "review_accepted": false
+  },
+  "status": "blocked",
+  "summary": "",
+  "plan": {
+    "request": "Write a Go function called IsPalindrome that checks if a string reads the same forwards and backwards",
+    "mode": "explore",
+    "steps": null,
+    "source": "unavailable",
+    "generated_at": "2026-10-11T06:40:11.7783327-07:00",
+    "notes": [
+      "planning failed: planning failed after 2 attempts: llm: role \"planner\" failed on 2 backend(s): ollama: llm/ollama: status 400: {\"error\":\"invalid model name\"} (after openai-8090: llm/openai: server error: request (8821 tokens) exceeds the available context size (8192 tokens), try increasing it)"
+    ],
+    "degraded": true
+  },
+  "files_changed": null,
+  "files_read": null,
+  "verification": null,
+  "verified": false,
+  "attempts": 1,
+  "tool_calls": 0,
+  "model_calls": 1,
+  "evidence": null,
+  "open_issues": null,
+  "degraded": true,
+  "degraded_reason": "planning failed after 2 attempts: llm: role \"planner\" failed on 2 backend(s): ollama: llm/ollama: status 400: {\"error\":\"invalid model name\"} (after openai-8090: llm/openai: server error: request (8821 tokens) exceeds the available context size (8192 tokens), try increasing it)",
+  "duration": 7497089600,
+  "log_dir": ""
+}

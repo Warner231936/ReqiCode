@@ -20,6 +20,7 @@ import (
 	"github.com/kilo/spiral-codemaker/core/spiral"
 	"github.com/kilo/spiral-codemaker/core/state"
 	"github.com/kilo/spiral-codemaker/core/units"
+	"github.com/kilo/spiral-codemaker/execution/build"
 	"github.com/kilo/spiral-codemaker/execution/sandbox"
 	"github.com/kilo/spiral-codemaker/models/registry"
 	"github.com/kilo/spiral-codemaker/models/routing"
@@ -73,6 +74,15 @@ type Orchestrator struct {
 	// engaged, so a run analysed without it is not mistaken for one analysed
 	// with it.
 	semiStateRaceEnabled bool
+
+	// lastBuildErr records the most recent build failure. A build
+	// failure is not a test result, so HasFailedTests cannot see it,
+	// and with no test files the test runner records nothing at all.
+	// Without this field a run whose code does not compile still
+	// reports "all tests passed, implementation complete" -- the exact
+	// false positive that makes the spiral untrustworthy. It is cleared
+	// by a passing test run, because `go test` compiles the code.
+	lastBuildErr string
 }
 
 func NewOrchestrator(projectRoot, outputPath, intent string, maxIterations int) (*Orchestrator, error) {
@@ -463,6 +473,7 @@ func (o *Orchestrator) runIteration() error {
 
 	o.spiralMgr.UpdatePhase(spiral.PhaseBuild)
 	br := o.sandbox.BuildRunner().Build(ctx)
+	o.recordBuildResult(br)
 	if !br.Success {
 		o.semiState.AddEvidence(state.Evidence{
 			Type:       state.EvidenceAnalysis,
@@ -481,6 +492,7 @@ func (o *Orchestrator) runIteration() error {
 	o.spiralMgr.UpdatePhase(spiral.PhaseTest)
 	o.runUnitSafe(ctx, o.testDesigner)
 	o.runUnitSafe(ctx, o.testRunner)
+	o.syncBuildFromTests()
 	o.semiStateRaceEnabled = o.codeGeneratorRaceStatus()
 
 	o.spiralMgr.UpdatePhase(spiral.PhaseCritique)
@@ -488,16 +500,24 @@ func (o *Orchestrator) runIteration() error {
 		o.spiralMgr.UpdatePhase(spiral.PhaseRevision)
 		o.runUnitSafe(ctx, o.debugger)
 		o.runUnitSafe(ctx, o.testRunner)
+		o.syncBuildFromTests()
 	}
 
 	o.runUnitSafe(ctx, o.consistencyChecker)
 	o.runUnitSafe(ctx, o.securityAnalyst)
 	o.runUnitSafe(ctx, o.critic)
 
-	if o.semiState.HasFailedTests() && o.spiralMgr.IterationsCompleted() < o.spiralMgr.MaxIterations() {
+	buildFailed := o.lastBuildErr != ""
+	testsFailed := o.semiState.HasFailedTests()
+
+	if (testsFailed || buildFailed) && o.spiralMgr.IterationsCompleted() < o.spiralMgr.MaxIterations() {
 		o.spiralMgr.UpdatePhase(spiral.PhaseFinalSynthesis)
 		o.runUnitSafe(ctx, o.synthesizer)
-		o.spiralMgr.EndIteration("iteration with test failures, will retry")
+		reason := "iteration with test failures, will retry"
+		if buildFailed && !testsFailed {
+			reason = "iteration with build failure, will retry"
+		}
+		o.spiralMgr.EndIteration(reason)
 		return nil
 	}
 
@@ -508,12 +528,56 @@ func (o *Orchestrator) runIteration() error {
 	o.runUnitSafe(ctx, o.synthesizer)
 
 	summary := "all tests passed, implementation complete"
-	if o.semiState.HasFailedTests() {
+	switch {
+	case buildFailed:
+		summary = "build failed: " + o.lastBuildErr
+	case testsFailed:
 		summary = "tests still failing after max iterations"
 	}
 	o.spiralMgr.EndIteration(summary)
 
 	return nil
+}
+
+// recordBuildResult stores the outcome of the orchestrator's build
+// gate. A failure is remembered because it is not a test result and
+// so is invisible to HasFailedTests, yet it means the generated code
+// does not compile and the run cannot honestly be called a success.
+func (o *Orchestrator) recordBuildResult(br build.BuildResult) {
+	if br.Success {
+		o.lastBuildErr = ""
+		return
+	}
+	o.lastBuildErr = br.Error
+}
+
+// syncBuildFromTests aligns the recorded build status with the most
+// recent test outcome.
+//
+// `go test` compiles the code, so a passing run proves the build is
+// sound and clears a failure recorded at the gate earlier in the
+// iteration -- without this, a build failure would persist as a stale
+// failure after the debugger repaired the code. A build-error class
+// failure records the build as broken; any other failure (assertion,
+// race) means the code compiled, so the build is sound.
+func (o *Orchestrator) syncBuildFromTests() {
+	res := o.semiState.GetTestResults()
+	if len(res) == 0 {
+		return
+	}
+	last := res[len(res)-1]
+	switch {
+	case last.Status == state.TestPassed:
+		o.lastBuildErr = ""
+	case last.FailureClass == "build_error":
+		msg := last.Stderr
+		if msg == "" {
+			msg = last.Stdout
+		}
+		o.lastBuildErr = msg
+	default:
+		o.lastBuildErr = ""
+	}
 }
 
 func (o *Orchestrator) runUnitSafe(ctx context.Context, u units.Unit) {
@@ -564,6 +628,10 @@ func (o *Orchestrator) codeGeneratorRaceStatus() bool {
 		return false
 	}
 	return strings.Contains(results[len(results)-1].Command, "-race")
+}
+
+func (o *Orchestrator) WithContext(ctx context.Context) {
+	o.ctx = ctx
 }
 
 func (o *Orchestrator) SemiState() *state.SemiState {

@@ -320,6 +320,91 @@ func TestDeclaredFuncsIgnoresMain(t *testing.T) {
 	}
 }
 
+func TestDeclaredTypesExtractsNames(t *testing.T) {
+	src := "package core\n\ntype Alpha struct{}\ntype Beta interface{ Foo() }\ntype Gamma[T any] struct{}\n"
+	got := declaredTypes(src)
+	set := map[string]bool{}
+	for _, g := range got {
+		set[g] = true
+	}
+	for _, want := range []string{"Alpha", "Beta", "Gamma"} {
+		if !set[want] {
+			t.Errorf("expected to extract type %q, got %v", want, got)
+		}
+	}
+}
+
+func TestDeclaredTypesSkipsCommentsAndMethods(t *testing.T) {
+	src := `package core
+
+// type Commented struct{}
+/* type Blocked struct{} */
+
+func (t *Thing) Method() {}
+
+type Real struct{}
+`
+	got := declaredTypes(src)
+	for _, g := range got {
+		if g == "Commented" || g == "Blocked" {
+			t.Errorf("commented-out types must not be extracted, got %v", got)
+		}
+	}
+	found := false
+	for _, g := range got {
+		if g == "Real" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected Real to be extracted, got %v", got)
+	}
+}
+
+func TestDeclaredSymbolsIncludesTypesAndFuncs(t *testing.T) {
+	src := "package core\n\ntype Widget struct{}\n\nfunc Build() {}\n"
+	got := declaredSymbols(src)
+	set := map[string]bool{}
+	for _, g := range got {
+		set[g] = true
+	}
+	if !set["Widget"] {
+		t.Errorf("expected type Widget in symbols, got %v", got)
+	}
+	if !set["Build"] {
+		t.Errorf("expected func Build in symbols, got %v", got)
+	}
+}
+
+func TestValidateLLMFilesRejectsDuplicateType(t *testing.T) {
+	// A type declared in two files of the same package is a
+	// redeclaration error. The function-only gate missed this:
+	// the same name once as an interface and once as a struct
+	// produced a workspace that did not compile but was reported
+	// as a success.
+	files := []FileSpec{
+		{Path: "pkg/core/types.go", Content: "package core\n\ntype WordCounter interface{ Count(string) int }\n"},
+		{Path: "pkg/core/word_counter.go", Content: "package core\n\ntype WordCounter struct{}\n\nfunc (w *WordCounter) Count(s string) int { return 0 }\n"},
+	}
+	if validateLLMFiles(files, nil) {
+		t.Error("a duplicate type declaration across files must be rejected")
+	}
+}
+
+func TestDedupeDeclarationsDropsDuplicateType(t *testing.T) {
+	files := []FileSpec{
+		{Path: "pkg/core/types.go", Content: "package core\n\ntype WordCounter interface{ Count(string) int }\n"},
+		{Path: "pkg/core/word_counter.go", Content: "package core\n\ntype WordCounter struct{}\n"},
+	}
+	kept, dropped := dedupeDeclarations(files)
+	if len(dropped) != 1 || dropped[0] != "pkg/core/word_counter.go" {
+		t.Errorf("expected word_counter.go dropped, got %v", dropped)
+	}
+	if len(kept) != 1 || kept[0].Path != "pkg/core/types.go" {
+		t.Errorf("expected types.go kept, got %v", kept)
+	}
+}
+
 func TestPackageNameDerivationForGate(t *testing.T) {
 	cases := map[string]string{
 		"pkg/core/core.go":    "core",

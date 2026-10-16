@@ -320,22 +320,24 @@ func (u *TestDesigner) deriveTestsFromGenerated(ss *state.SemiState, plan *state
 		}
 	}
 
-	// No generated package matches the assumed layout. Synthesise smoke tests
-	// against the package that exposes the most callable functions, which is the
-	// most substantial thing the generator produced.
-	var best *apiscan.API
-	var bestDir string
-	var bestCount int
+	// No generated package matches the assumed layout. Synthesise smoke
+	// tests for every package that exposes callable functions.
+	//
+	// This used to pick the single package with the most functions. That
+	// left every other package untested, and it picked `cmd/...`
+	// (package main) whenever the entry point happened to expose a helper,
+	// because the entry point is alphabetically first among ties. Testing
+	// one arbitrary package of a multi-package project is not verification:
+	// the compiler sees all of them, so the tests should too.
+	var testFiles []TestFileSpec
 	for _, dir := range names {
 		api, err := apiscan.Scan(filepath.Join(root, filepath.FromSlash(dir)))
 		if err != nil {
 			continue
 		}
-		if n := len(api.Functions); n > bestCount {
-			best, bestDir, bestCount = api, dir, n
-		}
+		testFiles = append(testFiles, testsFromAPI(api, dir)...)
 	}
-	if best == nil {
+	if len(testFiles) == 0 {
 		ss.AddEvidence(state.Evidence{
 			Type:       state.EvidenceObservation,
 			Content:    "generated code could not be scanned on disk; using plan layout for tests",
@@ -345,7 +347,7 @@ func (u *TestDesigner) deriveTestsFromGenerated(ss *state.SemiState, plan *state
 		return generateTestFilesForPlan(plan)
 	}
 
-	return testsFromAPI(best, bestDir)
+	return testFiles
 }
 
 // testsFromAPI emits smoke tests for a model-shaped API.
@@ -354,11 +356,30 @@ func (u *TestDesigner) deriveTestsFromGenerated(ss *state.SemiState, plan *state
 // not panic. Inventing an expected value would be guessing, and guessing is the
 // failure mode this path exists to eliminate.
 func testsFromAPI(api *apiscan.API, pkgDir string) []TestFileSpec {
-	pkgName := filepath.Base(pkgDir)
+	// The package clause must match the package the compiler will see in
+	// this directory, not the directory's own name. They differ for every
+	// cmd/... entry point: cmd/palindrome holds `package main`, and a test
+	// declaring `package palindrome` there is a redeclaration error --
+	// `found packages main (main.go) and palindrome (...)` -- which is the
+	// exact failure that made a run report test failures. apiscan parsed
+	// the real name out of the AST, so use it rather than guessing from
+	// the path.
+	pkgName := api.Package
 
 	var out []TestFileSpec
 	for _, fn := range api.Functions {
 		if fn.Receiver != "" || len(fn.Params) > 3 {
+			continue
+		}
+
+		// A function named Test* is a test, not API. The
+		// model sometimes drops a test into a non-test file
+		// (cmd/app/main.go carried a TestIsPalindrome), and
+		// generating a smoke test for it is circular: the
+		// call needs a *testing.T the signature does not say
+		// how to obtain, and a test that tests a test
+		// verifies nothing.
+		if strings.HasPrefix(fn.Name, "Test") {
 			continue
 		}
 
@@ -377,6 +398,15 @@ func testsFromAPI(api *apiscan.API, pkgDir string) []TestFileSpec {
 		}
 
 		call := fn.Name + "(" + strings.Join(args, ", ") + ")"
+		// A call to a function that returns nothing is a
+		// statement, not an expression, so `_ = ` before it
+		// is a compile error ("no value used as value").
+		// Only a function with results can be assigned to
+		// the blank identifier.
+		stmt := "_ = " + call
+		if len(fn.Results) == 0 {
+			stmt = call
+		}
 		content := fmt.Sprintf(`package %s
 
 import "testing"
@@ -387,9 +417,9 @@ import "testing"
 // arguments. Inventing an expected value would be guessing, and guessing is
 // exactly what a synthesised test must not do.
 func TestGenerated_%s(t *testing.T) {
-	_ = %s
+	%s
 }
-`, pkgName, sanitiseTestName(fn.Name), sanitiseTestName(fn.Name), call)
+`, pkgName, sanitiseTestName(fn.Name), sanitiseTestName(fn.Name), stmt)
 
 		out = append(out, TestFileSpec{
 			Path:        filepath.ToSlash(filepath.Join(pkgDir, "zz_generated_test.go")),
